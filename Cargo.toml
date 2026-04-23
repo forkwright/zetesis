@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = []
+members = [
+    "crates/zetesis-api",
+    "crates/zetesis-types",
+]
 
 [workspace.package]
 version = "0.0.1"
@@ -37,11 +40,25 @@ needless_pass_by_value = "allow"
 too_many_arguments = "allow"
 
 [workspace.dependencies]
-# Pinned here once sub-crates land. Phase 01 adds:
-# tokio = { version = "1", features = ["full"] }
-# serde = { version = "1", features = ["derive"] }
-# snafu = "0.8"
-# reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-# fjall = "2"
-# ciborium = "0.2"
-# jiff = "0.2"
+# Phase 01a: trait surface + shared types. Provider impls in later phases will
+# add reqwest, fjall, koina, etc. here.
+#
+# Fleet-pinned versions (kanon/aletheia/harmonia conventions):
+#   - snafu 0.8          (kanon, aletheia, harmonia)
+#   - jiff  0.2          (kanon)
+#   - serde 1 + derive   (kanon)
+#   - tokio 1 + full     (kanon)
+async-trait     = "0.1"
+ciborium        = "0.2"
+futures         = "0.3"
+jiff            = { version = "0.2", features = ["serde"] }
+language-tags   = { version = "0.3", features = ["serde"] }
+serde           = { version = "1", features = ["derive"] }
+serde_json      = "1"
+snafu           = "0.8"
+tokio           = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+url             = { version = "2", features = ["serde"] }
+
+# Path deps so downstream crates resolve workspace-locally.
+zetesis-api     = { version = "0.0.1", path = "crates/zetesis-api" }
+zetesis-types   = { version = "0.0.1", path = "crates/zetesis-types" }

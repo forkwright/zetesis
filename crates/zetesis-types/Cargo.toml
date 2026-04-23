@@ -1,0 +1,22 @@
+[package]
+name = "zetesis-types"
+description = "Shared types for the zetesis sovereign research substrate (result schema, citations, budget, tiers)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jiff          = { workspace = true }
+language-tags = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+url           = { workspace = true }
+
+[dev-dependencies]
+ciborium   = { workspace = true }
+serde_json = { workspace = true }
