@@ -1,0 +1,26 @@
+# Forge CI pipeline for forkwright/zetesis — Phase 0 placeholder.
+#
+# Zetesis is in Phase 0 spec work (see `~/dev/kanon/projects/zetesis/STATE.md`):
+# the workspace Cargo.toml declares `members = []` because the four-crate
+# decomposition (`zetesis` + `syllogē` + `elenkhos` + `synopsis`) has not
+# landed yet. The default Rust gate (fmt → check → clippy → nextest → lint)
+# can't run without a crate — `cargo fmt` aborts with "Failed to find
+# targets" and every downstream stage fails the same way. See kanon#135.
+#
+# This file runs a single no-op stage so forge CI stays green until real
+# code lands. When the workspace gains members (follow-up PR to the Phase 0
+# docs scaffold per STATE.md), replace this file with the fleet-canonical
+# 8-thread-capped pipeline — see `forkwright/akroasis/.kanon-ci.toml` as
+# the reference template. Keep in sync with
+# `crates/archeion/src/ci_config.rs::default_rust_gate` at that point.
+
+[pipeline]
+stages = ["placeholder"]
+
+[stages.placeholder]
+# No Rust crates to build yet; this stage succeeds unconditionally so the
+# pipeline Passes. Intentionally not `cargo fmt --check` / `kanon lint`:
+# an empty workspace can't pass either. Replace with a real pipeline when
+# the four-crate workspace lands.
+cmd = "true"
+timeout_secs = 30
