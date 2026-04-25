@@ -1,3 +1,9 @@
+<!--
+scope: zetesis repo conventions (research substrate: Tier-0 free APIs, self-hosted deep research, budget ledger)
+defers_to: ~/menos-ops/CLAUDE.md for machine topology (including `menos gpu research` mode); ~/.claude/CLAUDE.md for operator principles; kanon standards for universal engineering policy
+tightens: free-first routing discipline, budget as first-class constraint, caching-by-default via koina+fjall
+-->
+
 # zetesis
 
 Sovereign research substrate. Free-first routing across academic + reference APIs; self-hosted orchestration for deep research on local LLMs; budget-capped paid APIs as fallback.
@@ -14,7 +20,7 @@ Implementation starts in Phase 1 with `zetesis-api` trait surface + Tier 0 provi
 ## Repository conventions
 
 - Fleet-standard kanon conventions apply: snafu errors, tokio-async, zero blanket clippy suppressions, `#[non_exhaustive]` on every pub enum, `cfg_attr(not(test), deny(unwrap_used/expect_used))` in library crates.
-- License: AGPL-3.0. Matches aletheia / harmonia / akroasis. Keep proprietary or client-specific contract work out of this repo.
+- License: AGPL-3.0. Matches aletheia / harmonia / akroasis. Client-contract (Summus-adjacent) work does NOT go here.
 - Workspace member crates under `crates/<crate-name>/`; flat layout (no nested `crates/zetesis/<subcrate>/` pattern unless the workspace grows past ~10 crates).
 
 ## Why this repo instead of a kanon crate
@@ -33,8 +39,8 @@ Zetesis has at least three active/planned fleet consumers (aletheia, dioptron, a
 
 - Free-tier APIs have aggressive rate limits; `zetesis-budget` tracks free-tier quotas separately from paid spend.
 - Deep research can blow $10+ in token costs per query if orchestrated against Anthropic/OpenAI. Default backend is local logismos.
-- Research-mode GPU orchestration is environment-specific. Treat it as operator-managed runtime policy, not a committed repo invariant.
-- License is AGPL-3.0 - downstream consumers must comply; proprietary or client-specific contract work must not depend on zetesis.
+- `menos gpu research` mode (Phase 6, in coordination with menos-ops) is exclusive with `menos gpu inference` on the W7900; operator picks.
+- License is AGPL-3.0 - downstream consumers must comply; Summus-adjacent client work must not depend on zetesis.
 
 ## Related
 
@@ -46,5 +52,5 @@ Zetesis has at least three active/planned fleet consumers (aletheia, dioptron, a
 | logismos | Self-hosted orchestration backend |
 | koina + fjall | Cache + budget ledger persistence |
 | heurēma | Future semantic rerank of Tier 0 results |
-| Operator workspace | Runtime coordination surface |
+| menos-ops | `menos gpu research` mode owner |
 | hermeneus (inside aletheia) | Sibling primitive: hermeneus unifies LLM providers, zetesis unifies research providers |
