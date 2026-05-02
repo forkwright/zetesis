@@ -2,9 +2,7 @@
 
 *ζήτησις - systematic inquiry.*
 
-Sovereign research substrate. Unifies research and search providers (free-quality academic APIs, paid APIs, self-hosted orchestration) behind one Rust interface with budget enforcement, rate-limit management, cited result normalization, and a cache layer.
-
-**Status:** Phase 0 specification. Design in flight; no code yet beyond workspace manifest. See `forkwright/kanon:projects/zetesis/` for planning docs.
+Planned sovereign research substrate for unifying research and search providers behind one Rust interface with budget enforcement, rate-limit management, cited result normalization, and a cache layer.
 
 ## Why
 
@@ -13,22 +11,18 @@ Frontier-model built-in search is an opaque black-box priced per-token. Vendor a
 Zetesis takes a different shape:
 
 - **Free-first routing** across free-quality academic and reference APIs (Semantic Scholar, arXiv, OpenAlex, Crossref, PubMed, Wikipedia). Most research queries resolve here.
-- **Self-hosted orchestration** for deep research via GPT Researcher / LangChain `open_deep_research` running against local LLMs on dedicated GPU time. Multi-step synthesis at zero marginal cost.
+- **Self-hosted orchestration** for deep research through a local-first research loop running against local LLMs on dedicated GPU time. Multi-step synthesis should not require paid model APIs by default.
 - **Budget-capped paid APIs** (Brave, Exa) as fallback only when Tier 0 misses.
 - **Cached by default** with per-provider freshness windows.
 - **Cited + structured** output always; no synthesis without source provenance.
 
-## Architecture (target)
+## Architecture (planned)
 
 ```
-zetesis-api           trait surface: Provider, DeepResearch, Crawler + result types
-zetesis-providers     per-provider impls (feature-gated)
-zetesis-router        query-shape classifier + tier selection + fallback chains
-zetesis-budget        per-query / per-day / per-agent ceilings, cross-provider spend ledger
-zetesis-cache         query-hash keying, per-provider freshness windows
-zetesis-orchestrator  GPT Researcher + open_deep_research wrappers
-zetesis-mcp           MCP tool surface for claude-code + fleet agents
-zetesis-cli           operator inspection: budget, cache stats, providers, deep submit
+zetesis   facade crate, CLI/daemon entrypoints, consumer adapter traits
+sylloge   provider abstraction, routing, budget, cache, deep-research loop
+elenkhos  retrospective steel-manning engine
+synopsis  briefing synthesizer
 ```
 
 ## Consumer map
@@ -47,16 +41,8 @@ zetesis-cli           operator inspection: budget, cache stats, providers, deep 
 
 ## Development
 
-Phase 0 design doc in flight. Phase 1 implementation starts with `zetesis-api` trait surface + the first wave of Tier 0 providers (Semantic Scholar, arXiv, OpenAlex, Crossref, PubMed, Wikipedia).
-
-Planning docs live in `forkwright/kanon:projects/zetesis/`:
-
-- `vision.md` - purpose and principles
-- `STATE.md` - current phase and locked decisions
-- `ROADMAP.md` - 10-phase plan
-- `CLAUDE.md` - agent orientation
-- `phases/00-spec/PLAN.md` - Phase 0 detail
+Current planning authority lives in kanon project docs. This public README stays stable: purpose, boundaries, consumer map, and the planned crate shape. It should not duplicate the live roadmap.
 
 ## License
 
-AGPL-3.0
+AGPL-3.0-or-later
