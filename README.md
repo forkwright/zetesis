@@ -4,6 +4,9 @@
 
 Planned sovereign research substrate for unifying research and search providers behind one Rust interface with budget enforcement, rate-limit management, cited result normalization, and a cache layer.
 
+**Status:** Phase 0 specification. Design in flight; no code yet beyond the workspace manifest.
+**Canonical state:** [`forkwright/kanon:projects/zetesis/STATE.md`](https://github.com/forkwright/kanon/blob/main/projects/zetesis/STATE.md)
+
 ## Why
 
 Frontier-model built-in search is an opaque black-box priced per-token. Vendor aggregators (Brave / Exa / Tavily / You.com / Valyu / Perplexity) are pay-per-query with little architectural control and costs that compound fast at agent scale.
@@ -16,14 +19,16 @@ Zetesis takes a different shape:
 - **Cached by default** with per-provider freshness windows.
 - **Cited + structured** output always; no synthesis without source provenance.
 
-## Architecture (planned)
+## Architecture
 
-```
-zetesis   facade crate, CLI/daemon entrypoints, consumer adapter traits
-sylloge   provider abstraction, routing, budget, cache, deep-research loop
-elenkhos  retrospective steel-manning engine
-synopsis  briefing synthesizer
-```
+> **Phase 0 specification - no crates implemented yet.** The workspace `Cargo.toml` declares `members = []` because no crates have landed. The four-crate decomposition below is the locked design; canonical state and locked decisions live in [`forkwright/kanon:projects/zetesis/STATE.md`](https://github.com/forkwright/kanon/blob/main/projects/zetesis/STATE.md).
+
+| Crate | Role |
+|-------|------|
+| `zetesis` | Facade, CLI, daemon binary, adapter traits |
+| `syllogē` | Provider abstraction, routing, budget, cache, deep-research-orchestrator wrapper |
+| `elenkhos` | Retrospective steel-manning engine |
+| `synopsis` | Briefing synthesizer |
 
 ## Consumer map
 
@@ -41,7 +46,7 @@ synopsis  briefing synthesizer
 
 ## Development
 
-Current planning authority lives in kanon project docs. This public README stays stable: purpose, boundaries, consumer map, and the planned crate shape. It should not duplicate the live roadmap.
+Current planning authority lives in `forkwright/kanon:projects/zetesis/`. This public README stays stable: purpose, boundaries, consumer map, and the locked crate shape. It should not duplicate the live roadmap.
 
 ## License
 
