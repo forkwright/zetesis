@@ -1,3 +1,7 @@
+# archetype:
+# forge-only: false
+# spdx: AGPL-3.0-or-later
+
 # Forge CI pipeline for forkwright/zetesis — Phase 0 placeholder.
 #
 # Zetesis is in Phase 0 spec work (see `~/dev/kanon/projects/zetesis/STATE.md`):
