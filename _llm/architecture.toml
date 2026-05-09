@@ -1,0 +1,47 @@
+[meta]
+name = "zetesis"
+repo = "forkwright/zetesis"
+generated = false
+source_docs = [
+  "README.md",
+  "CLAUDE.md",
+  "Cargo.toml",
+  "kanon/projects/zetesis/STATE.md",
+]
+
+[architecture]
+summary = "Specification-stage sovereign research substrate for free-first provider routing, cached/cited results, budget enforcement, deep-research orchestration, steelmanning, and briefings."
+layers = [
+  "facade",
+  "provider-routing",
+  "budget-cache",
+  "deep-research",
+  "steelman",
+  "briefing",
+  "consumer-adapters",
+]
+
+[[architecture.crates]]
+name = "zetesis"
+path = "crates/zetesis"
+role = "Planned facade, CLI, daemon binary, and adapter traits."
+
+[[architecture.crates]]
+name = "sylloge"
+path = "crates/sylloge"
+role = "Planned provider abstraction, routing, budget, cache, and deep-research wrapper."
+
+[[architecture.crates]]
+name = "elenkhos"
+path = "crates/elenkhos"
+role = "Planned retrospective steel-manning engine."
+
+[[architecture.crates]]
+name = "synopsis"
+path = "crates/synopsis"
+role = "Planned briefing synthesizer."
+
+[[interfaces]]
+name = "zetesis daemon"
+kind = "cli"
+path = "crates/zetesis"

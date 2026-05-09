@@ -1,0 +1,42 @@
+[meta]
+name = "zetesis"
+repo = "forkwright/zetesis"
+generated = false
+source_docs = [
+  "README.md",
+  "CLAUDE.md",
+  "kanon/projects/zetesis/STATE.md",
+]
+
+[glossary]
+description = "Domain vocabulary for zetesis."
+
+[[terms]]
+term = "zetesis"
+definition = "Systematic inquiry; the research substrate and planned facade crate."
+canonical = true
+
+[[terms]]
+term = "sylloge"
+definition = "Collection; planned provider routing, budget, cache, and deep-research crate."
+canonical = true
+
+[[terms]]
+term = "elenkhos"
+definition = "Cross-examination; planned retrospective steel-manning crate."
+canonical = true
+
+[[terms]]
+term = "synopsis"
+definition = "Seeing together; planned briefing synthesis crate."
+canonical = true
+
+[[terms]]
+term = "Tier 0"
+definition = "Free-first academic/reference provider set."
+canonical = true
+
+[[terms]]
+term = "budget gate"
+definition = "Per-query, per-day, and per-consumer spending/usage constraint."
+canonical = true
