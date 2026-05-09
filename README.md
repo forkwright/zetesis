@@ -5,7 +5,7 @@
 Planned sovereign research substrate for unifying research and search providers behind one Rust interface with budget enforcement, rate-limit management, cited result normalization, and a cache layer.
 
 **Status:** Phase 0 specification. Design in flight; no code yet beyond the workspace manifest.
-**Canonical state:** [`forkwright/kanon:projects/zetesis/STATE.md`](https://github.com/forkwright/kanon/blob/main/projects/zetesis/STATE.md)
+**Canonical state:** See the internal planning record maintained for active roadmap and blocker status.
 
 ## Why
 
@@ -21,7 +21,7 @@ Zetesis takes a different shape:
 
 ## Architecture
 
-> **Phase 0 specification - no crates implemented yet.** The workspace `Cargo.toml` declares `members = []` because no crates have landed. The four-crate decomposition below is the locked design; canonical state and locked decisions live in [`forkwright/kanon:projects/zetesis/STATE.md`](https://github.com/forkwright/kanon/blob/main/projects/zetesis/STATE.md).
+> **Phase 0 specification - no crates implemented yet.** The workspace `Cargo.toml` declares `members = []` because no crates have landed. The four-crate decomposition below is the locked public design; active planning and decision records are maintained internally.
 
 | Crate | Role |
 |-------|------|
@@ -46,7 +46,7 @@ Zetesis takes a different shape:
 
 ## Development
 
-Current planning authority lives in `forkwright/kanon:projects/zetesis/`. This public README stays stable: purpose, boundaries, consumer map, and the locked crate shape. It should not duplicate the live roadmap.
+Current planning authority lives in the internal project state record. This public README stays stable: purpose, boundaries, consumer map, and the locked crate shape. It should not duplicate the live roadmap.
 
 ## License
 
