@@ -35,3 +35,5 @@ tarpaulin-report.html
 
 # kanon / fleet
 .worktrees/
+target/
+*.bak
