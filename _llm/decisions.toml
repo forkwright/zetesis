@@ -1,0 +1,52 @@
+[meta]
+name = "zetesis"
+repo = "forkwright/zetesis"
+generated = false
+source_docs = [
+  "README.md",
+  "CLAUDE.md",
+  "kanon/projects/zetesis/STATE.md",
+]
+
+[decisions]
+summary = "Locked Phase 0 decisions for the zetesis research substrate."
+
+[[decision]]
+id = "D-colocation-heavy"
+title = "Own consumer-agnostic research substrate mechanisms"
+status = "accepted"
+context = "Aletheia, dioptron, and akroasis all need research/search behavior with shared policy boundaries."
+decision = "Zetesis owns provider aggregation, routing, cache, budget, orchestration, steelmanning, briefings, and fact emission framework."
+consequences = "Consumers supply policy through adapter traits instead of each building research stacks."
+
+[[decision]]
+id = "D-four-crates"
+title = "Use four-crate decomposition"
+status = "accepted"
+context = "Prior PR shape violated naming/decomposition rules."
+decision = "Use zetesis, sylloge, elenkhos, and synopsis as the planned crate set."
+consequences = "Implementation starts from a clean four-crate workspace after Phase 0."
+
+[[decision]]
+id = "D-free-first"
+title = "Tier 0 free providers by default"
+status = "accepted"
+context = "Vendor search APIs are paid, opaque, and compound costs at agent scale."
+decision = "Route first through Semantic Scholar, arXiv, Wikipedia, Crossref, PubMed, OpenAlex list-mode, and SearXNG."
+consequences = "Paid providers are budget-gated fallbacks, not defaults."
+
+[[decision]]
+id = "D-cited-structured"
+title = "No synthesis without citations"
+status = "accepted"
+context = "Research outputs need provenance."
+decision = "Return cited and structured outputs with source provenance."
+consequences = "Consumers can ingest results into knowledge systems without opaque claims."
+
+[[decision]]
+id = "D-logismos-default"
+title = "Use local inference for deep research when ready"
+status = "accepted"
+context = "Deep-research loops can become expensive against hosted frontier APIs."
+decision = "Target logismos as the Tier 2 inference backend, with interim local fallback if needed."
+consequences = "Research orchestration aligns with fleet sovereignty and budget goals."

@@ -1,0 +1,32 @@
+[meta]
+name = "zetesis"
+repo = "forkwright/zetesis"
+generated = false
+source_docs = [
+  "README.md",
+  "CLAUDE.md",
+  "kanon/projects/zetesis/STATE.md",
+]
+
+[state]
+summary = "Zetesis is a Phase 0 specification repo with no implementation crates yet; the four-crate design and free-first provider posture are locked."
+current_phase = "Phase 0: specification."
+updated = "2026-05-05"
+
+[[recent]]
+date = "2026-04-23"
+item = "Scope, four-crate decomposition, free-first provider tiers, and consumer-adapter pattern locked."
+
+[[recent]]
+date = "2026-04-23"
+item = "Earlier PR shapes closed and superseded by the broadened research-substrate rewrite."
+
+[[open_threads]]
+name = "Phase 0 go/no-go gates"
+issue = 0
+status = "Tier 0 coverage, deep-research throughput, consumer adoption, and budget math must be evidenced before Phase 1."
+
+[[open_threads]]
+name = "GPU mode"
+issue = 0
+status = "Research GPU mode semantics still need coordination with menos-ops."

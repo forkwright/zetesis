@@ -1,0 +1,24 @@
+# Zetesis
+
+> Sovereign research substrate for free-first provider routing, cache, budget, citations, deep research, steelmanning, and briefings.
+
+Zetesis is in Phase 0 specification. No crates have landed yet; the locked implementation shape is four crates: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
+
+## Surface
+
+The current surface is planning and design. The future `zetesis` daemon/CLI will own provider routing and expose consumer adapter traits.
+
+## Architecture
+
+Structured LLM corpus:
+- [_llm/architecture.toml](_llm/architecture.toml): planned layers and crates
+- [_llm/current_state.toml](_llm/current_state.toml): phase, gates, and open threads
+- [_llm/decisions.toml](_llm/decisions.toml): accepted Phase 0 decisions
+- [_llm/glossary.toml](_llm/glossary.toml): zetesis vocabulary
+
+## Agent Entry Points
+
+- [README.md](README.md): purpose and public boundaries
+- [CLAUDE.md](CLAUDE.md): repo conventions and design principles
+- [Cargo.toml](Cargo.toml): currently empty workspace
+- `kanon/projects/zetesis/STATE.md`: canonical planning status
