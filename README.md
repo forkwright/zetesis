@@ -48,6 +48,10 @@ Zetesis takes a different shape:
 
 Current planning authority lives in the internal project state record. This public README stays stable: purpose, boundaries, consumer map, and the locked crate shape. It should not duplicate the live roadmap.
 
+## Design Notes
+
+- [Multi-signal classifiers](docs/research/multi-signal-classifiers.md) - required evidence record shape for classifier designs that combine weighted signals before export.
+
 ## License
 
 AGPL-3.0-or-later
