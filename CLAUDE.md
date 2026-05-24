@@ -1,6 +1,6 @@
 <!--
 scope: zetesis repo conventions (research substrate: Tier-0 free APIs, self-hosted deep research, budget ledger)
-defers_to: ~/menos-ops/CLAUDE.md for machine topology (including `menos gpu research` mode); ~/.claude/CLAUDE.md for operator principles; kanon standards for universal engineering policy
+defers_to: menos-ops CLAUDE.md for machine topology (including `menos gpu research` mode); operator global CLAUDE.md for operator principles; kanon standards for universal engineering policy
 tightens: free-first routing discipline, budget as first-class constraint, caching-by-default via koina+fjall
 -->
 
