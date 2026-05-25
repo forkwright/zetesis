@@ -4,7 +4,7 @@
 
 Planned sovereign research substrate for unifying research and search providers behind one Rust interface with budget enforcement, rate-limit management, cited result normalization, and a cache layer.
 
-**Status:** Phase 0 specification. Design in flight; no code yet beyond the workspace manifest.
+**Status:** Phase 0 specification. Design in flight; the workspace has a bootstrap facade crate so cargo and security gates can run before Phase 1 implementation.
 **Canonical state:** See the internal planning record maintained for active roadmap and blocker status.
 
 ## Why
@@ -21,7 +21,7 @@ Zetesis takes a different shape:
 
 ## Architecture
 
-> **Phase 0 specification - no crates implemented yet.** The workspace `Cargo.toml` declares `members = []` because no crates have landed. The four-crate decomposition below is the locked public design; active planning and decision records are maintained internally.
+> **Phase 0 specification - bootstrap crate only.** The workspace contains the `zetesis` facade crate as a gate target. The four-crate decomposition below is the locked public design; active planning and decision records are maintained internally.
 
 | Crate | Role |
 |-------|------|
