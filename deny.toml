@@ -1,0 +1,22 @@
+# cargo-deny configuration.
+
+[graph]
+targets = []
+all-features = false
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "AGPL-3.0-or-later",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

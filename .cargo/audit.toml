@@ -1,0 +1,8 @@
+# cargo-audit configuration.
+#
+# WHY: cargo-audit does not read deny.toml. This file mirrors deny.toml's
+# advisory ignore list so both tools stay in sync. Zetesis currently has no
+# suppressions; future ignores must cite the dependency chain and reason.
+
+[advisories]
+ignore = []
