@@ -51,6 +51,7 @@ Current planning authority lives in the internal project state record. This publ
 ## Design Notes
 
 - [Multi-signal classifiers](docs/research/multi-signal-classifiers.md) - required evidence record shape for classifier designs that combine weighted signals before export.
+- [Deep research provider decision](docs/research/deep-research-provider-decision.md) - Phase 05 decision to vendor the local-deep-researcher loop pattern, reuse the gpt-researcher `vllm_openai` adapter shape, and reject open_deep_research as the default contract.
 
 ## License
 

@@ -50,3 +50,11 @@ status = "accepted"
 context = "Deep-research loops can become expensive against hosted frontier APIs."
 decision = "Target logismos as the Tier 2 inference backend, with interim local fallback if needed."
 consequences = "Research orchestration aligns with fleet sovereignty and budget goals."
+
+[[decision]]
+id = "D-phase05-local-deep-researcher"
+title = "Vendor the local-deep-researcher loop pattern"
+status = "accepted"
+context = "Phase 05 compared local-deep-researcher, gpt-researcher, open_deep_research, and OpenManus for the deep-research backend contract."
+decision = "Implement LocalDeepResearch as a Rust port of local-deep-researcher's generate_query, web_research, summarize_sources, reflect_on_summary, and finalize_summary loop against the sylloge::DeepResearch submit/poll/fetch lifecycle. Reuse gpt-researcher's vllm_openai adapter convention for logismos-compatible inference."
+consequences = "Do not adopt open_deep_research as the default contract because its current search API enum is limited to Anthropic, OpenAI, Tavily, and none, with Tavily and OpenAI models as defaults. See docs/research/deep-research-provider-decision.md for source evidence."
