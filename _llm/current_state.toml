@@ -9,9 +9,13 @@ source_docs = [
 ]
 
 [state]
-summary = "Zetesis is a Phase 0 specification repo with a bootstrap facade crate for cargo/security gates; the four-crate design and free-first provider posture are locked."
-current_phase = "Phase 0: specification."
+summary = "Zetesis is a Phase 1 scaffold repo with the locked four-crate workspace and translated sylloge provider/result/budget surface."
+current_phase = "Phase 1: scaffold."
 updated = "2026-05-25"
+
+[[recent]]
+date = "2026-05-25"
+item = "Translated the orphan zetesis-api/zetesis-types branch into the locked four-crate workspace; sylloge now owns the provider/result/budget surface and zetesis re-exports it."
 
 [[recent]]
 date = "2026-05-25"
