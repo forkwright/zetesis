@@ -9,9 +9,13 @@ source_docs = [
 ]
 
 [state]
-summary = "Zetesis is a Phase 0 specification repo with no implementation crates yet; the four-crate design and free-first provider posture are locked."
+summary = "Zetesis is a Phase 0 specification repo with a bootstrap facade crate for cargo/security gates; the four-crate design and free-first provider posture are locked."
 current_phase = "Phase 0: specification."
-updated = "2026-05-05"
+updated = "2026-05-25"
+
+[[recent]]
+date = "2026-05-25"
+item = "Bootstrap zetesis facade crate landed so cargo workspace and security gates have a real target before Phase 1 implementation."
 
 [[recent]]
 date = "2026-04-23"

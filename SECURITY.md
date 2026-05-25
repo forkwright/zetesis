@@ -1,6 +1,6 @@
 # Security
 
-Zetesis is pre-release and does not yet ship implementation crates.
+Zetesis is pre-release and ships only a bootstrap facade crate.
 
 Report security issues privately to the maintainer. Do not file public issues for
 credentials, provider tokens, prompt-injection bypasses, cache poisoning, or data

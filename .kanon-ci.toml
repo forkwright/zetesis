@@ -2,28 +2,36 @@
 # forge-only: false
 # spdx: AGPL-3.0-or-later
 
-# Forge CI pipeline for forkwright/zetesis — Phase 0 placeholder.
+# Forge CI pipeline for forkwright/zetesis.
 #
-# Zetesis is in Phase 0 spec work (see `<repo>/STATE.md`):
-# the workspace Cargo.toml declares `members = []` because the four-crate
-# decomposition (`zetesis` + `syllogē` + `elenkhos` + `synopsis`) has not
-# landed yet. The default Rust gate (fmt → check → clippy → nextest → lint)
-# can't run without a crate — `cargo fmt` aborts with "Failed to find
-# targets" and every downstream stage fails the same way. See the internal CI
-# bootstrap tracker for the crate-landing follow-up.
+# Mirrors the hardcoded default Rust gate (fmt → check → clippy → nextest
+# → lint) but pins per-stage build + test concurrency to 8. Without this
+# cap, cargo defaults to num_cpus (64 on this Threadripper) and parallel
+# rustc + nextest processes can contend with other fleet work.
 #
-# This file runs a single no-op stage so forge CI stays green until real
-# code lands. When the workspace gains members (follow-up PR to the Phase 0
-# docs scaffold per STATE.md), replace this file with the fleet-canonical
-# 8-thread-capped pipeline — see `forkwright/akroasis/.kanon-ci.toml` as
-# the reference template. Keep in sync with
-# `crates/archeion/src/ci_config.rs::default_rust_gate` at that point.
+# Keep in sync with `crates/archeion/src/ci_config.rs::default_rust_gate`
+# when the upstream default changes — only the `--jobs` / `--test-threads`
+# flags should differ.
 
 [pipeline]
-stages = ["lint"]
+stages = ["cargo fmt", "cargo check", "cargo clippy", "cargo nextest", "kanon lint"]
 
-[stages.lint]
-# No Rust crates to build yet; keep a real repository lint gate until the
-# four-crate workspace lands.
-cmd = "kanon lint README.md --summary"
-timeout_secs = 60
+[stages."cargo fmt"]
+cmd = "cargo fmt --all -- --check"
+timeout_secs = 300
+
+[stages."cargo check"]
+cmd = "cargo check --workspace --all-targets --jobs 8"
+timeout_secs = 900
+
+[stages."cargo clippy"]
+cmd = "cargo clippy --workspace --all-targets --jobs 8 -- -D warnings"
+timeout_secs = 900
+
+[stages."cargo nextest"]
+cmd = "cargo nextest run --workspace --build-jobs 8 --test-threads 8"
+timeout_secs = 2700
+
+[stages."kanon lint"]
+cmd = "kanon lint . --summary"
+timeout_secs = 600
