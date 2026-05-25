@@ -10,9 +10,9 @@ Sovereign research substrate. Free-first routing across academic + reference API
 
 ## Status
 
-Phase 0 specification. Design in flight; planning authority lives in kanon project docs.
-
-Implementation starts in Phase 1 with the four-crate workspace: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
+Phase 1 scaffold. The four-crate workspace is present: `zetesis`,
+`sylloge`, `elenkhos`, and `synopsis`. `sylloge` owns the initial
+provider/result/budget API surface; `zetesis` re-exports it as the facade.
 
 ## Repository conventions
 

@@ -1,5 +1,6 @@
 [package]
-name = "zetesis"
+name = "synopsis"
+description = "Briefing synthesizer scaffold for zetesis."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +10,3 @@ publish = false
 
 [lints]
 workspace = true
-
-[dependencies]
-elenkhos = { workspace = true }
-sylloge = { workspace = true }
-synopsis = { workspace = true }
