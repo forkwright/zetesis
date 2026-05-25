@@ -16,8 +16,9 @@ nodes:
 
 The loop runs against `sylloge::DeepResearch`'s task lifecycle:
 `submit -> poll -> fetch`. The Phase 1 scaffold already exposes that trait; the
-backend implementation still needs task storage, local LLM binding, search
-configuration, result normalization, and integration tests.
+backend now has an in-memory `LocalDeepResearch` task lifecycle scaffold. It
+still needs local LLM binding, search configuration, loop execution, result
+normalization beyond fixture envelopes, and endpoint-backed integration tests.
 
 ## Source Evidence
 
@@ -48,8 +49,6 @@ Evidence was checked against upstream source snapshots on 2026-05-25.
 
 A shippable `LocalDeepResearch` implementation should include:
 
-- in-memory task lifecycle tests for pending, running, ready, failed, and
-  cancelled states;
 - a mock OpenAI-compatible LLM endpoint for query generation, summarization,
   reflection, and finalization;
 - fake DuckDuckGo/SearXNG search clients or fixtures so tests do not hit the
