@@ -40,6 +40,7 @@ mod cost;
 mod crawler;
 mod deep;
 mod error;
+mod local_deep_research;
 mod provider;
 mod query;
 mod result;
@@ -56,6 +57,7 @@ pub use error::{
     PermanentIoSnafu, ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result,
     TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
 };
+pub use local_deep_research::LocalDeepResearch;
 pub use provider::Provider;
 pub use query::QueryShape;
 pub use result::{ProvenanceEntry, ResearchResult, ResultHit};
