@@ -2,11 +2,11 @@
 
 > Sovereign research substrate for free-first provider routing, cache, budget, citations, deep research, steelmanning, and briefings.
 
-Zetesis is in Phase 0 specification. No crates have landed yet; the locked implementation shape is four crates: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
+Zetesis is in Phase 1 scaffold. The locked implementation shape is four crates: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
 
 ## Surface
 
-The current surface is planning and design. The future `zetesis` daemon/CLI will own provider routing and expose consumer adapter traits.
+The current Rust surface is the translated `sylloge` provider/result/budget API, re-exported by the `zetesis` facade. The future `zetesis` daemon/CLI will own process wiring and expose consumer adapter traits.
 
 ## Architecture
 
