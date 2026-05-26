@@ -1,3 +1,6 @@
+# WHY: Automates version bump PRs and CHANGELOG entries on every push to
+# main. release-please-config.json owns the package map and extra-files
+# list; the manifest tracks current versions.
 name: Release Please
 
 on:
@@ -5,15 +8,20 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 concurrency:
   group: release-please-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  placeholder:
+  release-please:
+    # WHY: Creates release PRs and tags when conventional commits land on main.
+    # Operator merges release PRs; never auto-merge them.
     runs-on: ubuntu-latest
     steps:
-      - name: Release pipeline pending first implementation crate
-        run: echo "Release automation activates when Phase 01 adds workspace packages."
+      - uses: googleapis/release-please-action@a02a34c4d625d9d3a7780d813b53fe9a97a0fe25 # v4.2.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
