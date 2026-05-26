@@ -17,8 +17,11 @@ nodes:
 The loop runs against `sylloge::DeepResearch`'s task lifecycle:
 `submit -> poll -> fetch`. The Phase 1 scaffold already exposes that trait; the
 backend now has an in-memory `LocalDeepResearch` task lifecycle scaffold. It
-still needs local LLM binding, search configuration, loop execution, result
-normalization beyond fixture envelopes, and endpoint-backed integration tests.
+now also has an offline fixture layer that exercises the five-node loop against
+deterministic query-generation, source-retrieval, synthesis, reflection, and
+finalization seams. It still needs real local LLM binding, search configuration,
+network-backed DuckDuckGo/SearXNG integration, and endpoint-backed integration
+tests.
 
 ## Source Evidence
 
@@ -45,14 +48,13 @@ Evidence was checked against upstream source snapshots on 2026-05-25.
   stable cache key. Do not add a parallel `{ summary, citations,
   knowledge_gaps }` result type unless the public API is deliberately revised.
 
-## Minimum Backend Slice
+## Remaining Backend Work
 
-A shippable `LocalDeepResearch` implementation should include:
+The remaining non-fixture `LocalDeepResearch` implementation should include:
 
-- a mock OpenAI-compatible LLM endpoint for query generation, summarization,
+- real OpenAI-compatible local LLM binding for query generation, summarization,
   reflection, and finalization;
-- fake DuckDuckGo/SearXNG search clients or fixtures so tests do not hit the
-  network;
-- assertions that every final result carries citations/provenance and budget
-  accounting;
-- explicit fetch-before-ready behavior, matching the `DeepResearch` contract.
+- DuckDuckGo/SearXNG search client integration behind the existing offline seams;
+- endpoint-backed assertions that every final result carries citations,
+  provenance, and budget accounting;
+- timeout, cancellation, and retry behavior for non-fixture execution.

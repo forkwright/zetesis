@@ -40,6 +40,7 @@ mod cost;
 mod crawler;
 mod deep;
 mod error;
+mod fixture;
 mod local_deep_research;
 mod provider;
 mod query;
@@ -57,6 +58,7 @@ pub use error::{
     PermanentIoSnafu, ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result,
     TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
 };
+pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
 pub use local_deep_research::LocalDeepResearch;
 pub use provider::Provider;
 pub use query::QueryShape;

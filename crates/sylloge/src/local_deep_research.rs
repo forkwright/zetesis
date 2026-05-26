@@ -3,9 +3,9 @@
 //! The eventual Phase 05 backend will run the local-deep-researcher loop
 //! (`generate_query -> web_research -> summarize_sources ->
 //! reflect_on_summary -> finalize_summary`) against local model/search
-//! adapters. This type deliberately starts smaller: it owns the in-memory
-//! task lifecycle required by [`crate::DeepResearch`] so the orchestration
-//! loop can be added without changing the public submit/poll/fetch contract.
+//! adapters. This type owns the in-memory task lifecycle required by
+//! [`crate::DeepResearch`] and can execute a deterministic offline loop
+//! fixture without changing the public submit/poll/fetch contract.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +18,8 @@ use crate::ResearchResult;
 use crate::constraints::{DeepDepth, ResearchStatus, TaskId};
 use crate::deep::DeepResearch;
 use crate::error::{FatalCorruptionSnafu, InvalidQuerySnafu, Result, UnsupportedSnafu};
+use crate::fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
+use crate::query::QueryShape;
 
 /// In-memory lifecycle scaffold for the future local deep-research backend.
 ///
@@ -106,6 +108,38 @@ impl LocalDeepResearch {
     /// poisoned.
     pub fn task_count(&self) -> Result<usize> {
         Ok(self.lock_tasks()?.len())
+    }
+
+    /// Execute a previously-submitted task using an offline fixture.
+    ///
+    /// Marks the task running, drives the five-node loop, and completes the
+    /// task with the resulting normalized [`ResearchResult`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Unsupported`] if the task is unknown, or
+    /// [`crate::Error::FatalCorruption`] if the task store mutex is poisoned.
+    pub fn execute_offline<Q, R, S>(
+        &self,
+        task: &TaskId,
+        fixture: &OfflineFixture<Q, R, S>,
+        shape: QueryShape,
+    ) -> Result<ResearchResult>
+    where
+        Q: QueryGenerator,
+        R: SourceRetriever,
+        S: Synthesizer,
+    {
+        let (query, depth) = {
+            let tasks = self.lock_tasks()?;
+            let record = task_record(&tasks, task)?;
+            (record.query.clone(), record.depth)
+        };
+
+        self.mark_running(task, Some(0))?;
+        let result = fixture.run(&query, shape, depth);
+        self.complete_task(task, result.clone(), Timestamp::now())?;
+        Ok(result)
     }
 
     fn lock_tasks(&self) -> Result<MutexGuard<'_, HashMap<TaskId, TaskRecord>>> {
