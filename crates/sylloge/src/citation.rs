@@ -108,7 +108,8 @@ pub struct Citation {
 
     /// Provider-supplied confidence that this citation is relevant to the
     /// query, normalized to `0.0..=1.0`. Values outside the range are
-    /// clamped by [`Citation::new`].
+    /// clamped by [`Citation::new`] and at the deserialization boundary.
+    #[serde(deserialize_with = "crate::serde_util::clamp_unit_f32")]
     pub confidence: f32,
 
     /// MIME content type of the payload (e.g. `text/html`, `application/pdf`,
@@ -229,6 +230,26 @@ mod tests {
 
         let web_high = Citation::new(sample_url(), sample_ts(), SourceKind::Web, 1.0, None);
         assert!(!web_high.is_strong());
+    }
+
+    #[test]
+    fn deserialization_clamps_out_of_range_confidence() {
+        // WHY: `confidence` is a pub field, so serde is a second
+        // construction path; the clamp must hold there too or the
+        // documented 0.0..=1.0 invariant is bypassable.
+        let json = r#"{
+            "source_url": "https://example.org/paper",
+            "accessed_at": "2026-04-22T00:00:00Z",
+            "source_kind": "journal",
+            "confidence": 7.5,
+            "content_type": null
+        }"#;
+        let c: Citation = serde_json::from_str(json).unwrap();
+        assert!((c.confidence - 1.0).abs() < f32::EPSILON);
+
+        let negative = json.replace("7.5", "-3.0");
+        let c: Citation = serde_json::from_str(&negative).unwrap();
+        assert!(c.confidence.abs() < f32::EPSILON);
     }
 
     #[test]

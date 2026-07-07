@@ -6,13 +6,11 @@
 //! possible error value, and that the selectors are usable through the
 //! re-exported paths a downstream crate will actually use.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
-
 use sylloge::{
-    BudgetExceededSnafu, Error, FatalCorruptionSnafu, InvalidQuerySnafu, PermanentIoSnafu,
-    ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, TimeoutSnafu, TransientIoSnafu,
-    UnauthorizedSnafu, UnsupportedSnafu,
+    BudgetExceededSnafu, DomainDeniedSnafu, Error, FatalCorruptionSnafu, InvalidQuerySnafu,
+    MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu, ProviderFailureSnafu,
+    QuotaExhaustedSnafu, RateLimitedSnafu, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu,
+    TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
 };
 
 fn all_variants() -> Vec<Error> {
@@ -67,6 +65,30 @@ fn all_variants() -> Vec<Error> {
             reason: "m".to_owned(),
         }
         .build(),
+        TaskNotReadySnafu {
+            task: "t".to_owned(),
+            detail: "m".to_owned(),
+        }
+        .build(),
+        TaskUnavailableSnafu {
+            task: "t".to_owned(),
+            reason: "m".to_owned(),
+        }
+        .build(),
+        MissingCitationsSnafu {
+            title: "t".to_owned(),
+        }
+        .build(),
+        OversizedPayloadSnafu {
+            what: "body".to_owned(),
+            len: 2_usize,
+            max: 1_usize,
+        }
+        .build(),
+        DomainDeniedSnafu {
+            url: "https://denied.example/".to_owned(),
+        }
+        .build(),
     ]
 }
 
@@ -99,12 +121,14 @@ fn exposes_snafu_selectors_through_crate_root() {
     // WHY: providers will call builders as
     // `sylloge::ProviderFailureSnafu { .. }.build()`. The `visibility(pub)`
     // attribute on the enum publishes these selectors; this test makes
-    // sure the spelling survives re-export via lib.rs.
-    let _e: Error = ProviderFailureSnafu {
+    // sure the spelling survives re-export via lib.rs — and that the
+    // built value classifies as documented.
+    let e: Error = ProviderFailureSnafu {
         provider: "x".to_owned(),
         message: "y".to_owned(),
     }
     .build();
+    assert!(e.is_transient());
 }
 
 #[test]
@@ -114,7 +138,9 @@ fn transient_set_is_expected_members() {
         .filter(Error::is_transient)
         .map(|e| match e {
             Error::ProviderFailure { .. } => "ProviderFailure",
+            Error::QuotaExhausted { .. } => "QuotaExhausted",
             Error::RateLimited { .. } => "RateLimited",
+            Error::TaskNotReady { .. } => "TaskNotReady",
             Error::Timeout { .. } => "Timeout",
             Error::TransientIo { .. } => "TransientIo",
             _ => unreachable!("is_transient returned true for unexpected variant"),
@@ -124,7 +150,14 @@ fn transient_set_is_expected_members() {
     sorted.sort_unstable();
     assert_eq!(
         sorted,
-        ["ProviderFailure", "RateLimited", "Timeout", "TransientIo"]
+        [
+            "ProviderFailure",
+            "QuotaExhausted",
+            "RateLimited",
+            "TaskNotReady",
+            "Timeout",
+            "TransientIo"
+        ]
     );
 }
 
@@ -148,10 +181,13 @@ fn permanent_set_is_expected_members() {
         .filter(Error::is_permanent)
         .map(|e| match e {
             Error::BudgetExceeded { .. } => "BudgetExceeded",
-            Error::QuotaExhausted { .. } => "QuotaExhausted",
-            Error::Unauthorized { .. } => "Unauthorized",
+            Error::DomainDenied { .. } => "DomainDenied",
             Error::InvalidQuery { .. } => "InvalidQuery",
+            Error::MissingCitations { .. } => "MissingCitations",
+            Error::OversizedPayload { .. } => "OversizedPayload",
             Error::PermanentIo { .. } => "PermanentIo",
+            Error::TaskUnavailable { .. } => "TaskUnavailable",
+            Error::Unauthorized { .. } => "Unauthorized",
             Error::Unsupported { .. } => "Unsupported",
             _ => unreachable!("is_permanent returned true for unexpected variant"),
         })
@@ -161,9 +197,12 @@ fn permanent_set_is_expected_members() {
         perms,
         [
             "BudgetExceeded",
+            "DomainDenied",
             "InvalidQuery",
+            "MissingCitations",
+            "OversizedPayload",
             "PermanentIo",
-            "QuotaExhausted",
+            "TaskUnavailable",
             "Unauthorized",
             "Unsupported"
         ]

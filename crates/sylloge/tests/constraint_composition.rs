@@ -7,14 +7,18 @@
 //! round-trip between caller-composed constraints and their serialized
 //! form.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
+#![expect(clippy::unwrap_used, reason = "test assertions must fail loudly")]
 
 use std::time::Duration;
 
+use jiff::Timestamp;
 use url::Url;
 
-use sylloge::{BudgetConstraint, CostTracking, ProviderSpend, SearchConstraints};
+use sylloge::{BudgetConstraint, SearchConstraints, SpendLedger};
+
+fn now() -> Timestamp {
+    "2026-07-01T00:00:00Z".parse().unwrap()
+}
 
 #[test]
 fn default_constraints_permit_arbitrary_url() {
@@ -43,28 +47,28 @@ fn compose_all_builders() {
 fn budget_composition_free_only_rejects_paid_tier() {
     let c = SearchConstraints::new(10, BudgetConstraint::free_only());
     // Free-only budget: any paid spend fails.
-    assert!(!c.budget.permits(1, &CostTracking::default()));
-    assert!(c.budget.permits(0, &CostTracking::default()));
+    assert!(!c.budget.permits(1, &SpendLedger::new(), now()));
+    assert!(c.budget.permits(0, &SpendLedger::new(), now()));
 }
 
 #[test]
 fn budget_composition_phase_zero_blocks_expensive_call() {
     let c = SearchConstraints::new(10, BudgetConstraint::phase_zero_default());
     // $0.05 = 500_000 micro-cents per query cap.
-    assert!(c.budget.permits(500_000, &CostTracking::default()));
-    assert!(!c.budget.permits(500_001, &CostTracking::default()));
+    assert!(c.budget.permits(500_000, &SpendLedger::new(), now()));
+    assert!(!c.budget.permits(500_001, &SpendLedger::new(), now()));
 }
 
 #[test]
 fn budget_composition_ledger_drives_cumulative_caps() {
     let c = SearchConstraints::new(10, BudgetConstraint::phase_zero_default());
-    let full = CostTracking::from_line_items([ProviderSpend::new(
-        "exa",
-        c.budget.per_day_cap_micro_cents,
-        0,
-        1,
-    )]);
-    assert!(!c.budget.permits(1, &full));
+    let mut full = SpendLedger::new();
+    full.record(now(), c.budget.per_day_cap_micro_cents);
+    assert!(!c.budget.permits(1, &full, now()));
+    // The same ledger permits again once the 24h window rolls past the
+    // recorded spend.
+    let next_day: Timestamp = "2026-07-02T01:00:00Z".parse().unwrap();
+    assert!(c.budget.permits(1, &full, next_day));
 }
 
 #[test]

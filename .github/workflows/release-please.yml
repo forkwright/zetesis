@@ -1,6 +1,8 @@
 # WHY: Automates version bump PRs and CHANGELOG entries on every push to
 # main. release-please-config.json owns the package map and extra-files
-# list; the manifest tracks current versions.
+# list; the manifest tracks current versions. When a release is cut, the
+# attest job publishes SLSA build provenance plus a CycloneDX SBOM for the
+# source archive so consumers can verify what shipped.
 name: Release Please
 
 on:
@@ -8,7 +10,9 @@ on:
     branches: [main]
 
 permissions:
+  attestations: write
   contents: write
+  id-token: write
   pull-requests: write
 
 concurrency:
@@ -20,8 +24,50 @@ jobs:
     # WHY: Creates release PRs and tags when conventional commits land on main.
     # Operator merges release PRs; never auto-merge them.
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@a02a34c4d625d9d3a7780d813b53fe9a97a0fe25 # v4.2.0
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  attest-release-source:
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Stage source archive
+        id: source
+        run: |
+          archive="zetesis-${{ needs.release-please.outputs.tag_name }}.tar.gz"
+          git archive --format=tar.gz --output "$archive" HEAD
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          artifact-name: ${{ steps.source.outputs.archive }}.cdx.json
+          format: cyclonedx-json
+          output-file: ${{ steps.source.outputs.archive }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest source provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ steps.source.outputs.archive }}
+
+      - name: Attest CycloneDX SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ steps.source.outputs.archive }}
+          sbom-path: ${{ steps.source.outputs.archive }}.cdx.json

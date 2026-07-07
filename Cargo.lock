@@ -3,17 +3,6 @@
 version = 4
 
 [[package]]
-name = "async-trait"
-version = "0.1.89"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -497,7 +486,6 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "sylloge"
 version = "0.0.1"
 dependencies = [
- "async-trait",
  "ciborium",
  "futures",
  "jiff",
@@ -714,8 +702,10 @@ name = "zetesis"
 version = "0.0.1"
 dependencies = [
  "elenkhos",
+ "jiff",
  "sylloge",
  "synopsis",
+ "url",
 ]
 
 [[package]]

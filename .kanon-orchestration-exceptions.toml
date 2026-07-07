@@ -1,0 +1,6 @@
+# Documented exceptions for ORCHESTRATION/main-worktree-commit-prohibited.
+# Format: [main_worktree_commit] <40-hex-sha> = "<one-line justification>".
+
+[main_worktree_commit]
+6ce91cfceadf09a928b480ab8b7bb9bedf70e341 = "pre-existing branch commit authored in the main checkout before the worktree-isolation convention; superseded by squash-merge"
+80db7809834421ebb335afd7da05428b71afa21e = "pre-existing branch commit authored in the main checkout before the worktree-isolation convention; superseded by squash-merge"

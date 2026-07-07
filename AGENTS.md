@@ -1,4 +1,8 @@
-<!-- scope: zetesis dispatch conventions; defers_to: CLAUDE.md for repo conventions -->
+<!--
+scope: zetesis dispatch conventions and agent entry points
+defers_to: CLAUDE.md for repo conventions and design principles; kanon standards for universal engineering policy
+tightens: gate discipline (truthful Gate-Passed trailers, no history rewrites, no AI indicators)
+-->
 
 # zetesis — agent entry point
 

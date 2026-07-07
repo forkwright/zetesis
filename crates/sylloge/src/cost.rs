@@ -5,21 +5,85 @@
 //! free-tier quota units consumed (so the budget layer can throttle before
 //! hitting provider-side rate limits).
 //!
-//! Spend is tracked in USD cents as `u64` rather than floating point to
-//! avoid rounding drift across aggregation. A `u64` of cents covers every
-//! realistic fleet budget.
+//! Spend is tracked in USD micro-cents as `u64` rather than floating point
+//! to avoid rounding drift across aggregation. A `u64` of micro-cents
+//! covers every realistic fleet budget.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Stable provider identifier matching `Provider::name()`.
+///
+/// Lowercase, kebab-or-underscore-separated by convention (e.g.
+/// `semantic_scholar`). Like [`crate::TaskId`], the format is owned by the
+/// provider — no validation at construction.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderId(String);
+
+impl ProviderId {
+    /// Construct from a provider-supplied identifier.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Access the inner string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for ProviderId {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for ProviderId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl AsRef<str> for ProviderId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ProviderId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<&str> for ProviderId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<ProviderId> for &str {
+    fn eq(&self, other: &ProviderId) -> bool {
+        *self == other.0
+    }
+}
+
 /// Per-provider line item inside [`CostTracking`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ProviderSpend {
-    /// Provider identifier matching `Provider::name()`. Stable, lowercase,
-    /// kebab-or-underscore-separated (e.g. `semantic_scholar`).
-    pub provider_id: String,
+    /// Provider identifier matching `Provider::name()`.
+    pub provider_id: ProviderId,
 
     /// Paid spend in USD micro-cents (one-hundred-thousandths of a cent, so
     /// 1 USD = `10_000_000` micro-cents). Micro-cents give per-request
@@ -41,7 +105,7 @@ impl ProviderSpend {
     /// Construct a line item.
     #[must_use]
     pub fn new(
-        provider_id: impl Into<String>,
+        provider_id: impl Into<ProviderId>,
         paid_micro_cents: u64,
         free_tier_units: u64,
         request_count: u32,
@@ -71,7 +135,7 @@ impl ProviderSpend {
 #[non_exhaustive]
 pub struct CostTracking {
     /// Per-provider breakdown keyed by `ProviderSpend::provider_id`.
-    pub by_provider: BTreeMap<String, ProviderSpend>,
+    pub by_provider: BTreeMap<ProviderId, ProviderSpend>,
 }
 
 impl CostTracking {
@@ -79,23 +143,11 @@ impl CostTracking {
     /// `provider_id` are summed.
     #[must_use]
     pub fn from_line_items<I: IntoIterator<Item = ProviderSpend>>(items: I) -> Self {
-        let mut by_provider: BTreeMap<String, ProviderSpend> = BTreeMap::new();
+        let mut tracking = Self::default();
         for item in items {
-            by_provider
-                .entry(item.provider_id.clone())
-                .and_modify(|existing| {
-                    existing.paid_micro_cents = existing
-                        .paid_micro_cents
-                        .saturating_add(item.paid_micro_cents);
-                    existing.free_tier_units = existing
-                        .free_tier_units
-                        .saturating_add(item.free_tier_units);
-                    existing.request_count =
-                        existing.request_count.saturating_add(item.request_count);
-                })
-                .or_insert(item);
+            tracking.add(item);
         }
-        Self { by_provider }
+        tracking
     }
 
     /// Record (or accumulate) a line item in-place.
@@ -123,13 +175,17 @@ impl CostTracking {
             .fold(0_u64, u64::saturating_add)
     }
 
-    /// Total paid spend in whole-USD as `f64`. Reserved for display / log
-    /// output; accounting should operate on the integer micro-cents field.
+    /// Total paid spend rendered as a whole-USD decimal string (e.g.
+    /// `"1.2345678"`). Display / log output only; accounting operates on
+    /// the integer micro-cents values. Integer arithmetic throughout — no
+    /// float precision loss.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
-    pub fn total_paid_usd(&self) -> f64 {
+    pub fn total_paid_usd_display(&self) -> String {
+        let total = self.total_paid_micro_cents();
         // 1 USD = 10_000_000 micro-cents.
-        (self.total_paid_micro_cents() as f64) / 10_000_000.0
+        let dollars = total / 10_000_000;
+        let fraction = total % 10_000_000;
+        format!("{dollars}.{fraction:07}")
     }
 
     /// Total request count across every provider.
@@ -214,6 +270,42 @@ mod tests {
         let json = serde_json::to_string(&ct).unwrap();
         let back: CostTracking = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ct);
+    }
+
+    #[test]
+    fn provider_id_is_serde_transparent() {
+        // WHY: ProviderId keys the by_provider map; a transparent
+        // representation keeps the serialized ledger shape identical to
+        // the pre-newtype `String` form (no migration for persisted data).
+        let id = ProviderId::new("semantic_scholar");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"semantic_scholar\"");
+        let back: ProviderId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn provider_id_string_conveniences() {
+        let id = ProviderId::from("brave");
+        assert_eq!(id.as_str(), "brave");
+        assert_eq!(id.to_string(), "brave");
+        assert_eq!(id, "brave");
+        assert_eq!("brave", id);
+        assert_eq!(id.as_ref(), "brave");
+    }
+
+    #[test]
+    fn total_paid_usd_display_uses_integer_math() {
+        let ct = CostTracking::from_line_items([ProviderSpend::new("exa", 12_345_678, 0, 1)]);
+        assert_eq!(ct.total_paid_usd_display(), "1.2345678");
+
+        let small = CostTracking::from_line_items([ProviderSpend::new("exa", 500, 0, 1)]);
+        assert_eq!(small.total_paid_usd_display(), "0.0000500");
+
+        assert_eq!(
+            CostTracking::default().total_paid_usd_display(),
+            "0.0000000"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "elenkhos"
-description = "Retrospective steel-manning engine scaffold for zetesis."
+description = "Reserved crate boundary for the zetesis retrospective steel-manning engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

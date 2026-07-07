@@ -15,9 +15,11 @@ use std::time::Duration;
 use jiff::Timestamp;
 use language_tags::LanguageTag;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use url::Url;
 
 use crate::BudgetConstraint;
+use crate::error::{OversizedPayloadSnafu, Result};
 
 /// Per-call constraints supplied by the caller.
 ///
@@ -42,9 +44,13 @@ pub struct SearchConstraints {
 
     /// If set, only hits from these domains are acceptable. Each entry is
     /// a suffix match (e.g. `.edu` matches `mit.edu` and `foo.mit.edu`).
+    /// Matching is ASCII case-insensitive (RFC 4343) and ignores a
+    /// trailing root dot on either side.
     pub domain_allowlist: Option<Vec<String>>,
 
-    /// Domains to reject outright. Each entry is a suffix match.
+    /// Domains to reject outright. Each entry is a suffix match with the
+    /// same case-insensitive, trailing-dot-tolerant semantics as
+    /// [`SearchConstraints::domain_allowlist`].
     pub domain_denylist: Option<Vec<String>>,
 
     /// Budget ceiling for this call. See [`BudgetConstraint`] for the
@@ -99,7 +105,8 @@ impl SearchConstraints {
     ///
     /// Semantics: denylist is checked first (any match = reject). Then
     /// allowlist: if present, the host must match at least one entry. If
-    /// allowlist is absent, any non-denied host is accepted.
+    /// allowlist is absent, any non-denied host is accepted. Comparison is
+    /// ASCII case-insensitive on both the host and the configured entries.
     ///
     /// A URL without a host (e.g. `file:/`) is rejected when the
     /// allowlist is set, and accepted otherwise.
@@ -129,9 +136,21 @@ impl Default for SearchConstraints {
 }
 
 fn matches_suffix(host: &str, suffix: &str) -> bool {
-    // Strip a leading dot if supplied (".edu" and "edu" both mean the same
-    // thing: any host ending in ".edu").
+    // WHY: domain names are case-insensitive (RFC 4343) and a trailing
+    // root dot is semantically empty, so both sides are normalized before
+    // comparison — otherwise a caller-supplied ".EDU" or "Tracker.Example"
+    // entry would silently never match the always-lowercase host the url
+    // crate produces. A leading dot on the suffix is stripped (".edu" and
+    // "edu" both mean: any host equal to or ending in ".edu").
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
     let suffix = suffix.strip_prefix('.').unwrap_or(suffix);
+    let suffix = suffix
+        .strip_suffix('.')
+        .unwrap_or(suffix)
+        .to_ascii_lowercase();
+    if suffix.is_empty() {
+        return false;
+    }
     if host == suffix {
         return true;
     }
@@ -143,7 +162,7 @@ fn matches_suffix(host: &str, suffix: &str) -> bool {
         return false;
     }
     match host.get(..prefix_len) {
-        Some(prefix) => prefix.ends_with('.') && host.ends_with(suffix),
+        Some(prefix) => prefix.ends_with('.') && host.ends_with(suffix.as_str()),
         None => false,
     }
 }
@@ -267,6 +286,19 @@ impl ResearchStatus {
         )
     }
 
+    /// Stable lowercase name of the lifecycle state (matches the serde
+    /// `state` tag).
+    #[must_use]
+    pub const fn state_name(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running { .. } => "running",
+            Self::Ready { .. } => "ready",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
     /// Build a running status, clamping progress to `0..=100`.
     #[must_use]
     pub fn running(progress_pct: Option<u8>) -> Self {
@@ -287,12 +319,15 @@ pub struct PageContent {
     /// `application/pdf`).
     pub content_type: String,
 
-    /// Raw body bytes.
+    /// Raw body bytes. Capped at [`PageContent::MAX_BODY_BYTES`] by
+    /// [`PageContent::new`].
     pub body: Vec<u8>,
 
     /// Extracted plain-text rendering of the body, if the crawler could
     /// produce one. HTML extractors typically fill this; PDF pipelines
-    /// leave it `None` unless configured for OCR.
+    /// leave it `None` unless configured for OCR. Capped at
+    /// [`PageContent::MAX_TEXT_BYTES`] by
+    /// [`PageContent::with_extracted_text`].
     pub extracted_text: Option<String>,
 
     /// Timestamp the fetch completed.
@@ -300,29 +335,62 @@ pub struct PageContent {
 }
 
 impl PageContent {
+    /// Maximum accepted `body` size in bytes. Crawled pages come from
+    /// untrusted origins; anything beyond this cap is rejected at
+    /// construction rather than buffered.
+    pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+    /// Maximum accepted `extracted_text` size in bytes.
+    pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
     /// Construct a page-content record. `extracted_text` starts `None`;
     /// use [`PageContent::with_extracted_text`] to attach it.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::OversizedPayload`] when `body` exceeds
+    /// [`PageContent::MAX_BODY_BYTES`].
     pub fn new(
         final_url: Url,
         content_type: impl Into<String>,
         body: Vec<u8>,
         fetched_at: Timestamp,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        ensure!(
+            body.len() <= Self::MAX_BODY_BYTES,
+            OversizedPayloadSnafu {
+                what: "page body",
+                len: body.len(),
+                max: Self::MAX_BODY_BYTES,
+            }
+        );
+        Ok(Self {
             final_url,
             content_type: content_type.into(),
             body,
             extracted_text: None,
             fetched_at,
-        }
+        })
     }
 
     /// Builder: attach extracted plain-text.
-    #[must_use]
-    pub fn with_extracted_text(mut self, text: impl Into<String>) -> Self {
-        self.extracted_text = Some(text.into());
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::OversizedPayload`] when `text` exceeds
+    /// [`PageContent::MAX_TEXT_BYTES`].
+    pub fn with_extracted_text(mut self, text: impl Into<String>) -> Result<Self> {
+        let text = text.into();
+        ensure!(
+            text.len() <= Self::MAX_TEXT_BYTES,
+            OversizedPayloadSnafu {
+                what: "extracted text",
+                len: text.len(),
+                max: Self::MAX_TEXT_BYTES,
+            }
+        );
+        self.extracted_text = Some(text);
+        Ok(self)
     }
 
     /// Whether the content type looks like HTML.
@@ -379,6 +447,55 @@ mod tests {
         assert!(c.permits_url(&Url::parse("https://mit.edu/").unwrap()));
         assert!(c.permits_url(&Url::parse("https://cs.mit.edu/").unwrap()));
         assert!(!c.permits_url(&Url::parse("https://mit.com/").unwrap()));
+    }
+
+    #[test]
+    fn matches_suffix_is_case_insensitive() {
+        // WHY: domain names are case-insensitive (RFC 4343); the url
+        // crate always produces lowercase hosts, so a mixed-case entry
+        // that only matched byte-for-byte would silently never fire.
+        assert!(matches_suffix("mit.edu", ".EDU"));
+        assert!(matches_suffix("mit.edu", "MIT.EDU"));
+        assert!(matches_suffix("cs.mit.edu", "MIT.edu"));
+        assert!(!matches_suffix("badmit.edu", "MIT.EDU"));
+    }
+
+    #[test]
+    fn permits_url_mixed_case_denylist_blocks() {
+        let c = SearchConstraints::new(10, BudgetConstraint::default())
+            .with_denylist(vec!["Tracker.Example".to_owned()]);
+        assert!(!c.permits_url(&Url::parse("https://tracker.example/pixel").unwrap()));
+        assert!(!c.permits_url(&Url::parse("https://sub.tracker.example/x").unwrap()));
+        assert!(c.permits_url(&Url::parse("https://other.example/x").unwrap()));
+    }
+
+    #[test]
+    fn permits_url_mixed_case_allowlist_matches() {
+        let c = SearchConstraints::new(10, BudgetConstraint::default())
+            .with_allowlist(vec![".EDU".to_owned()]);
+        assert!(c.permits_url(&Url::parse("https://mit.edu/").unwrap()));
+        assert!(!c.permits_url(&Url::parse("https://mit.com/").unwrap()));
+    }
+
+    #[test]
+    fn matches_suffix_tolerates_trailing_root_dot() {
+        // Fully-qualified hosts with a trailing root dot are the same
+        // domain; entries written FQDN-style must match too.
+        assert!(matches_suffix("mit.edu.", ".edu"));
+        assert!(matches_suffix("mit.edu", "edu."));
+        assert!(matches_suffix("mit.edu.", "mit.edu."));
+        let c = SearchConstraints::new(10, BudgetConstraint::default())
+            .with_allowlist(vec![".edu".to_owned()]);
+        assert!(c.permits_url(&Url::parse("https://mit.edu./").unwrap()));
+    }
+
+    #[test]
+    fn matches_suffix_rejects_degenerate_entries() {
+        // "." and "" normalize to an empty suffix, which must never match
+        // (an empty suffix would otherwise allow every host).
+        assert!(!matches_suffix("mit.edu", "."));
+        assert!(!matches_suffix("mit.edu", ""));
+        assert!(!matches_suffix("mit.edu", ".."));
     }
 
     #[test]
@@ -470,6 +587,32 @@ mod tests {
     }
 
     #[test]
+    fn research_status_state_names_match_serde_tags() {
+        let cases: [(ResearchStatus, &str); 5] = [
+            (ResearchStatus::Pending, "pending"),
+            (ResearchStatus::running(None), "running"),
+            (
+                ResearchStatus::Ready {
+                    completed_at: "2026-04-22T00:00:00Z".parse().unwrap(),
+                },
+                "ready",
+            ),
+            (
+                ResearchStatus::Failed {
+                    message: "x".to_owned(),
+                },
+                "failed",
+            ),
+            (ResearchStatus::Cancelled, "cancelled"),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(status.state_name(), expected);
+            let json = serde_json::to_value(&status).unwrap();
+            assert_eq!(json["state"], expected);
+        }
+    }
+
+    #[test]
     fn running_clamps_progress() {
         let r = ResearchStatus::running(Some(250));
         if let ResearchStatus::Running { progress_pct } = r {
@@ -524,6 +667,37 @@ mod tests {
         };
         assert!(!p.is_html());
         assert_eq!(p.body_len(), 100);
+    }
+
+    #[test]
+    fn page_content_new_rejects_oversized_body() {
+        // WHY: provider payloads are untrusted; the cap is the defense
+        // against a hostile or broken origin exhausting memory.
+        let err = PageContent::new(
+            Url::parse("https://example.org/huge").unwrap(),
+            "text/html",
+            vec![0_u8; PageContent::MAX_BODY_BYTES + 1],
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.is_permanent());
+        assert!(err.to_string().contains("page body"));
+    }
+
+    #[test]
+    fn with_extracted_text_rejects_oversized_text() {
+        let page = PageContent::new(
+            Url::parse("https://example.org/").unwrap(),
+            "text/html",
+            b"<html></html>".to_vec(),
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        let err = page
+            .with_extracted_text("x".repeat(PageContent::MAX_TEXT_BYTES + 1))
+            .unwrap_err();
+        assert!(err.is_permanent());
+        assert!(err.to_string().contains("extracted text"));
     }
 
     #[test]

@@ -14,9 +14,11 @@
 //! - [`Crawler`] — per-URL full-page content retrieval for when a hit
 //!   needs the body extracted.
 //!
-//! All three traits are `async_trait`-based so they can be stored as
-//! `Box<dyn Trait>` in the future router. See `Cargo.toml` for the
-//! `async-trait` rationale.
+//! All three traits hand-roll their async methods as [`BoxFut`] returns
+//! (`Pin<Box<dyn Future + Send>>`) so they stay dyn-compatible — the
+//! future router stores them as `Box<dyn Trait>` / `Arc<dyn Trait>` —
+//! with `Send`-bounded futures and no `async-trait` dependency.
+//! Implementations wrap method bodies in `Box::pin(async move { .. })`.
 //!
 //! # Error taxonomy
 //!
@@ -45,22 +47,24 @@ mod local_deep_research;
 mod provider;
 mod query;
 mod result;
+mod serde_util;
 mod tier;
 
-pub use budget::BudgetConstraint;
+pub use budget::{BudgetConstraint, DAY_WINDOW, SpendEvent, SpendLedger};
 pub use citation::{Citation, SourceKind};
 pub use constraints::{DeepDepth, PageContent, ResearchStatus, SearchConstraints, TaskId};
-pub use cost::{CostTracking, ProviderSpend};
+pub use cost::{CostTracking, ProviderId, ProviderSpend};
 pub use crawler::Crawler;
 pub use deep::DeepResearch;
 pub use error::{
-    BudgetExceededSnafu, Error, ErrorClass, FatalCorruptionSnafu, InvalidQuerySnafu,
-    PermanentIoSnafu, ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result,
-    TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
+    BudgetExceededSnafu, DomainDeniedSnafu, Error, ErrorClass, FatalCorruptionSnafu,
+    InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu,
+    ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result, TaskNotReadySnafu,
+    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
 };
 pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
 pub use local_deep_research::LocalDeepResearch;
-pub use provider::Provider;
+pub use provider::{BoxFut, Provider};
 pub use query::QueryShape;
 pub use result::{ProvenanceEntry, ResearchResult, ResultHit};
 pub use tier::ProviderTier;

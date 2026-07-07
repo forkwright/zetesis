@@ -73,7 +73,9 @@ pub enum Error {
     /// The provider's free-tier quota has been exhausted for this window.
     /// Distinct from [`Error::RateLimited`]: a quota exhaustion is
     /// window-scoped (per day, per month) where a rate-limit is
-    /// instantaneous (per second, per burst).
+    /// instantaneous (per second, per burst). Transient: the quota comes
+    /// back when the provider's window resets, so the caller may retry
+    /// after a (typically long) delay or fall through to another provider.
     #[snafu(display("provider '{provider}' free-tier quota exhausted"))]
     QuotaExhausted {
         /// Provider identifier.
@@ -170,7 +172,86 @@ pub enum Error {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+
+    /// The deep-research task exists but has not reached a terminal state,
+    /// so its result is not available yet. Transient: poll via
+    /// [`super::DeepResearch::poll`] and retry the fetch once
+    /// [`super::ResearchStatus::is_ready`] holds.
+    #[snafu(display("deep-research task '{task}' is not ready: {detail}"))]
+    TaskNotReady {
+        /// Task identifier as supplied by the caller.
+        task: String,
+        /// Current lifecycle detail (state name plus query context).
+        detail: String,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// The deep-research task cannot serve the requested operation from its
+    /// current lifecycle state: it failed, was cancelled, is unknown to the
+    /// backend, or is in a conflicting state (e.g. executing a task that is
+    /// not pending). Permanent: this task will never produce a result;
+    /// submit a new task instead.
+    #[snafu(display("deep-research task '{task}' unavailable: {reason}"))]
+    TaskUnavailable {
+        /// Task identifier as supplied by the caller.
+        task: String,
+        /// Why the task cannot serve the operation.
+        reason: String,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// A [`super::ResultHit`] was constructed with zero citations,
+    /// violating the "no synthesis without source provenance" invariant.
+    /// Permanent: the caller must supply at least one [`super::Citation`].
+    #[snafu(display("hit '{title}' has no citations; every hit must carry provenance"))]
+    MissingCitations {
+        /// Title of the hit that lacked provenance.
+        title: String,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// A payload exceeded one of the crate's defensive size caps (untrusted
+    /// provider responses must not exhaust memory). Permanent for this
+    /// payload: the caller must truncate or reject it upstream.
+    #[snafu(display("{what} is {len} bytes, exceeding the {max}-byte cap"))]
+    OversizedPayload {
+        /// Which payload tripped the cap (e.g. `page body`).
+        what: String,
+        /// Observed payload size in bytes.
+        len: usize,
+        /// The cap that was exceeded, in bytes.
+        max: usize,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// The URL's host is rejected by the caller's domain allow/deny
+    /// constraints. Permanent: retrying the same URL cannot succeed under
+    /// the same [`super::SearchConstraints`].
+    #[snafu(display("domain denied by constraints: {url}"))]
+    DomainDenied {
+        /// The rejected URL.
+        url: String,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
+
+// INVARIANT: errors cross task boundaries (`tokio::spawn`, `JoinSet`), so
+// `Error` must stay `Send + Sync + 'static`. The compiler proves it here;
+// the property cannot silently regress.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync + 'static>() {}
+    assert_send_sync::<Error>();
+};
 
 /// Coarse classification for retry logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,8 +269,8 @@ impl Error {
     /// Whether this error is safe to retry.
     ///
     /// Returns `true` for [`Error::ProviderFailure`], [`Error::RateLimited`],
-    /// [`Error::Timeout`], and [`Error::TransientIo`]. Returns `false` for
-    /// every other variant.
+    /// [`Error::QuotaExhausted`], [`Error::Timeout`], [`Error::TransientIo`],
+    /// and [`Error::TaskNotReady`]. Returns `false` for every other variant.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         matches!(self.class(), ErrorClass::Transient)
@@ -214,14 +295,19 @@ impl Error {
         match self {
             Self::ProviderFailure { .. }
             | Self::RateLimited { .. }
-            | Self::Timeout { .. }
-            | Self::TransientIo { .. } => ErrorClass::Transient,
-            Self::BudgetExceeded { .. }
             | Self::QuotaExhausted { .. }
+            | Self::Timeout { .. }
+            | Self::TransientIo { .. }
+            | Self::TaskNotReady { .. } => ErrorClass::Transient,
+            Self::BudgetExceeded { .. }
             | Self::Unauthorized { .. }
             | Self::InvalidQuery { .. }
             | Self::PermanentIo { .. }
-            | Self::Unsupported { .. } => ErrorClass::Permanent,
+            | Self::Unsupported { .. }
+            | Self::TaskUnavailable { .. }
+            | Self::MissingCitations { .. }
+            | Self::OversizedPayload { .. }
+            | Self::DomainDenied { .. } => ErrorClass::Permanent,
             Self::FatalCorruption { .. } => ErrorClass::Fatal,
         }
     }
@@ -229,8 +315,9 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use snafu::IntoError;
+
+    use super::*;
 
     #[test]
     fn provider_failure_is_transient() {
@@ -266,13 +353,17 @@ mod tests {
     }
 
     #[test]
-    fn quota_exhausted_is_permanent() {
+    fn quota_exhausted_is_transient() {
+        // WHY: quota exhaustion is window-scoped — the quota returns when
+        // the provider's window resets — so retry-after-delay is correct,
+        // unlike credential or input errors.
         let e: Error = QuotaExhaustedSnafu {
             provider: "pubmed".to_owned(),
             window: Some("per_day".to_owned()),
         }
         .build();
-        assert!(e.is_permanent());
+        assert!(e.is_transient());
+        assert!(!e.is_permanent());
     }
 
     #[test]
@@ -343,6 +434,61 @@ mod tests {
     }
 
     #[test]
+    fn task_not_ready_is_transient() {
+        let e: Error = TaskNotReadySnafu {
+            task: "local-deep-research-1".to_owned(),
+            detail: "state=running".to_owned(),
+        }
+        .build();
+        assert!(e.is_transient());
+        assert!(!e.is_permanent());
+    }
+
+    #[test]
+    fn task_unavailable_is_permanent() {
+        let e: Error = TaskUnavailableSnafu {
+            task: "local-deep-research-1".to_owned(),
+            reason: "task failed: fixture failure".to_owned(),
+        }
+        .build();
+        assert!(e.is_permanent());
+        assert!(!e.is_transient());
+    }
+
+    #[test]
+    fn missing_citations_is_permanent() {
+        let e: Error = MissingCitationsSnafu {
+            title: "uncited hit".to_owned(),
+        }
+        .build();
+        assert!(e.is_permanent());
+    }
+
+    #[test]
+    fn oversized_payload_is_permanent() {
+        let e: Error = OversizedPayloadSnafu {
+            what: "page body".to_owned(),
+            len: 11_000_000_usize,
+            max: 10_485_760_usize,
+        }
+        .build();
+        assert!(e.is_permanent());
+        let s = format!("{e}");
+        assert!(s.contains("11000000"));
+        assert!(s.contains("10485760"));
+    }
+
+    #[test]
+    fn domain_denied_is_permanent() {
+        let e: Error = DomainDeniedSnafu {
+            url: "https://tracker.example/pixel".to_owned(),
+        }
+        .build();
+        assert!(e.is_permanent());
+        assert!(format!("{e}").contains("tracker.example"));
+    }
+
+    #[test]
     fn classes_are_mutually_exclusive() {
         let errs = [
             ProviderFailureSnafu {
@@ -378,12 +524,6 @@ mod tests {
         let s = format!("{e}");
         assert!(s.contains("brave"));
         assert!(s.contains("502"));
-    }
-
-    #[test]
-    fn error_is_send_and_sync() {
-        fn assert_send_sync<T: Send + Sync + 'static>() {}
-        assert_send_sync::<Error>();
     }
 
     #[test]

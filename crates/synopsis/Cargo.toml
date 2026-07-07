@@ -1,6 +1,6 @@
 [package]
 name = "synopsis"
-description = "Briefing synthesizer scaffold for zetesis."
+description = "Reserved crate boundary for the zetesis briefing synthesizer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

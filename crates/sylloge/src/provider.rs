@@ -5,12 +5,23 @@
 //! agents will land six Tier 0 providers (Semantic Scholar, arXiv,
 //! `OpenAlex`, Crossref, `PubMed`, Wikipedia) against this trait.
 
-use async_trait::async_trait;
-
-use crate::{ProviderTier, ResearchResult};
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::constraints::SearchConstraints;
 use crate::error::Result;
+use crate::{ProviderTier, ResearchResult};
+
+/// `Send`-bounded boxed future returned by every async method on the
+/// [`Provider`], [`crate::DeepResearch`], and [`crate::Crawler`] traits.
+///
+/// WHY: native `async fn` in traits is not dyn-compatible, and the router
+/// stores backends as `Arc<dyn Provider>` / `Box<dyn DeepResearch>`.
+/// Hand-rolling each async method as `fn name(..) -> BoxFut<'_, T>` keeps
+/// the traits object-safe with `Send` futures — the same surface the
+/// banned `async-trait` crate generated, without the dependency.
+/// Implementations wrap their bodies in `Box::pin(async move { .. })`.
+pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Single-shot search provider.
 ///
@@ -36,7 +47,6 @@ use crate::error::Result;
 /// seen. Providers that issue multiple upstream HTTP calls should use a
 /// scoped `JoinSet` so dropping the outer future aborts the in-flight
 /// calls.
-#[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable provider identifier.
     fn name(&self) -> &'static str;
@@ -48,9 +58,13 @@ pub trait Provider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error`] if the provider rejects the query, fails
-    /// to reach its upstream, or surfaces a transport-level failure. The
-    /// caller uses [`crate::Error::is_transient`] to decide whether to
-    /// retry.
-    async fn search(&self, query: &str, constraints: &SearchConstraints) -> Result<ResearchResult>;
+    /// The returned future resolves to [`crate::Error`] if the provider
+    /// rejects the query, fails to reach its upstream, or surfaces a
+    /// transport-level failure. The caller uses
+    /// [`crate::Error::is_transient`] to decide whether to retry.
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, Result<ResearchResult>>;
 }

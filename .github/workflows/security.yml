@@ -53,12 +53,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # WHY: install a PREBUILT cargo-audit binary, not `cargo install` from
+      # source — a source build couples cargo-audit's ever-climbing MSRV to
+      # this repo's pinned toolchain (rust-toolchain 1.85), which fails both
+      # ways (0.22 needs rustc 1.88; 0.21's rustsec can't parse CVSS-4.0
+      # advisories now in the DB). The prebuilt binary is toolchain-independent.
+      # See kanon#2385.
+      - uses: taiki-e/install-action@a416ddeedbd372e614cc1386e8b642692f66865e # v2
         with:
-          key: cargo-audit
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version ^0.22
+          tool: cargo-audit@0.22.2
       - name: cargo audit
         # WHY: -D unmaintained,unsound,yanked escalates those categories
         # to errors. Suppressions go through .cargo/audit.toml.
