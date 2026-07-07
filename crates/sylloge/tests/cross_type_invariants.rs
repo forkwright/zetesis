@@ -2,8 +2,7 @@
 //! this crate. Unit tests inside each module cover per-type invariants;
 //! this file covers the interactions.
 
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
+#![expect(clippy::unwrap_used, reason = "test assertions must fail loudly")]
 
 use std::collections::BTreeMap;
 
@@ -12,7 +11,7 @@ use url::Url;
 
 use sylloge::{
     BudgetConstraint, Citation, CostTracking, ProvenanceEntry, ProviderSpend, ProviderTier,
-    QueryShape, ResearchResult, ResultHit, SourceKind,
+    QueryShape, ResearchResult, ResultHit, SourceKind, SpendLedger,
 };
 
 fn ts() -> Timestamp {
@@ -41,13 +40,16 @@ fn web_citation() -> Citation {
 
 #[test]
 fn research_result_with_mixed_provenance_reports_provider_count_correctly() {
-    let hits = vec![ResultHit::new(
-        "t",
-        "s",
-        Url::parse("https://example.org/x").unwrap(),
-        vec![authoritative_citation()],
-        0.9,
-    )];
+    let hits = vec![
+        ResultHit::new(
+            "t",
+            "s",
+            Url::parse("https://example.org/x").unwrap(),
+            vec![authoritative_citation()],
+            0.9,
+        )
+        .unwrap(),
+    ];
     let provenance = vec![
         ProvenanceEntry::new("semantic_scholar", authoritative_citation()),
         ProvenanceEntry::new("semantic_scholar", authoritative_citation()),
@@ -72,7 +74,8 @@ fn hit_with_multiple_citations_one_strong_is_strong() {
         Url::parse("https://example.org/x").unwrap(),
         vec![web_citation(), authoritative_citation()],
         0.8,
-    );
+    )
+    .unwrap();
     assert!(hit.has_strong_citation());
 }
 
@@ -84,7 +87,8 @@ fn hit_with_only_weak_citations_is_not_strong() {
         Url::parse("https://example.org/x").unwrap(),
         vec![web_citation(), web_citation()],
         0.9,
-    );
+    )
+    .unwrap();
     assert!(!hit.has_strong_citation());
 }
 
@@ -110,14 +114,18 @@ fn cost_tracking_in_research_result_round_trips() {
 
 #[test]
 fn budget_composes_with_cost_tracking_from_research_result() {
-    // Simulate: a Tier-1 call made against a Tier-1 budget, then the
-    // cost_spent from the response is used to check the next call.
+    // Simulate: a Tier-1 call made against a Tier-1 budget; the response's
+    // cost_spent is folded into the persisted ledger, which then gates the
+    // next call at the same instant.
     let b = BudgetConstraint::phase_zero_default();
+    let now = ts();
     let first_call = CostTracking::from_line_items([ProviderSpend::new("brave", 100_000, 0, 1)]);
+    let mut ledger = SpendLedger::new();
+    ledger.record_cost(now, &first_call);
     // A second call of 100_000 micro-cents should still be permitted; a
     // giant cumulative call would not.
-    assert!(b.permits(100_000, &first_call));
-    assert!(!b.permits(b.per_day_cap_micro_cents, &first_call));
+    assert!(b.permits(100_000, &ledger, now));
+    assert!(!b.permits(b.per_day_cap_micro_cents, &ledger, now));
 }
 
 #[test]
@@ -174,6 +182,7 @@ fn metadata_bmap_preserves_insertion_independent_ordering() {
         vec![authoritative_citation()],
         0.9,
     )
+    .unwrap()
     .with_metadata("z", serde_json::Value::String("last".to_owned()))
     .with_metadata("a", serde_json::Value::String("first".to_owned()));
 
@@ -184,6 +193,7 @@ fn metadata_bmap_preserves_insertion_independent_ordering() {
         vec![authoritative_citation()],
         0.9,
     )
+    .unwrap()
     .with_metadata("a", serde_json::Value::String("first".to_owned()))
     .with_metadata("z", serde_json::Value::String("last".to_owned()));
 
@@ -217,7 +227,8 @@ fn btreemap_metadata_survives_ciborium() {
         Url::parse("https://example.org/x").unwrap(),
         vec![authoritative_citation()],
         0.9,
-    );
+    )
+    .unwrap();
     hit.metadata = meta;
     let mut buf = Vec::new();
     ciborium::into_writer(&hit, &mut buf).unwrap();

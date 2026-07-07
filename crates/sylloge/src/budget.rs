@@ -1,14 +1,123 @@
-//! Pre-call budget constraints.
+//! Pre-call budget constraints and the persisted spend ledger.
 //!
 //! A [`BudgetConstraint`] is supplied by the caller on every research
-//! request. The future budget layer checks the current ledger
+//! request. The budget layer checks the agent's persisted [`SpendLedger`]
 //! against the constraints and short-circuits the router if any ceiling
 //! would be exceeded. The caller's intent is captured once at call time;
 //! the router does not silently raise limits.
+//!
+//! [`SpendLedger`] carries timestamped paid-spend events so the per-day cap
+//! is a true rolling 24-hour window, while the per-agent (lifetime) cap
+//! reads an unpruned running total. [`crate::CostTracking`] remains the
+//! per-call cost report; the router folds each call's paid total into the
+//! ledger via [`SpendLedger::record_cost`].
 
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::cost::CostTracking;
+
+/// Length of the rolling per-day budget window.
+pub const DAY_WINDOW: SignedDuration = SignedDuration::from_hours(24);
+
+/// Single timestamped paid-spend entry inside a [`SpendLedger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SpendEvent {
+    /// When the spend was recorded.
+    pub at: Timestamp,
+    /// Paid spend in USD micro-cents.
+    pub paid_micro_cents: u64,
+}
+
+/// Persisted per-agent paid-spend ledger with rolling-window accounting.
+///
+/// Two views over the same recordings:
+/// - lifetime total — never pruned; feeds
+///   [`BudgetConstraint::per_agent_cap_micro_cents`].
+/// - timestamped events — feed the rolling 24-hour
+///   [`BudgetConstraint::per_day_cap_micro_cents`] window and may be pruned
+///   once they leave it ([`SpendLedger::prune_expired`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendLedger {
+    lifetime_paid_micro_cents: u64,
+    events: Vec<SpendEvent>,
+}
+
+impl SpendLedger {
+    /// Empty ledger.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a paid spend of `paid_micro_cents` at `at`. Zero-spend
+    /// records are ignored — free-tier usage is tracked in
+    /// [`CostTracking::free_tier_units`], not here.
+    pub fn record(&mut self, at: Timestamp, paid_micro_cents: u64) {
+        if paid_micro_cents == 0 {
+            return;
+        }
+        self.lifetime_paid_micro_cents = self
+            .lifetime_paid_micro_cents
+            .saturating_add(paid_micro_cents);
+        self.events.push(SpendEvent {
+            at,
+            paid_micro_cents,
+        });
+    }
+
+    /// Fold a per-call [`CostTracking`] report into the ledger at `at`.
+    pub fn record_cost(&mut self, at: Timestamp, cost: &CostTracking) {
+        self.record(at, cost.total_paid_micro_cents());
+    }
+
+    /// Lifetime paid spend in micro-cents. Unaffected by pruning.
+    #[must_use]
+    pub const fn lifetime_paid_micro_cents(&self) -> u64 {
+        self.lifetime_paid_micro_cents
+    }
+
+    /// Paid spend recorded strictly after `cutoff`, in micro-cents.
+    #[must_use]
+    pub fn paid_since_micro_cents(&self, cutoff: Timestamp) -> u64 {
+        self.events
+            .iter()
+            .filter(|e| e.at > cutoff)
+            .map(|e| e.paid_micro_cents)
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    /// Paid spend inside the rolling 24-hour window ending at `now`, in
+    /// micro-cents.
+    #[must_use]
+    pub fn paid_in_day_window_micro_cents(&self, now: Timestamp) -> u64 {
+        self.paid_since_micro_cents(day_window_start(now))
+    }
+
+    /// Recorded spend events, in recording order.
+    #[must_use]
+    pub fn events(&self) -> &[SpendEvent] {
+        &self.events
+    }
+
+    /// Drop events that have left the 24-hour window as of `now`, bounding
+    /// ledger growth. The lifetime total is unaffected: only the per-day
+    /// window reads the event list, and an expired event can never re-enter
+    /// a later window (windows only move forward).
+    pub fn prune_expired(&mut self, now: Timestamp) {
+        let cutoff = day_window_start(now);
+        self.events.retain(|e| e.at > cutoff);
+    }
+}
+
+/// Start of the rolling 24-hour window ending at `now`.
+fn day_window_start(now: Timestamp) -> Timestamp {
+    // WHY: saturate at Timestamp::MIN instead of erroring — a window that
+    // reaches past the representable range simply includes every event,
+    // which is the conservative (spend-limiting) direction.
+    now.checked_sub(DAY_WINDOW).unwrap_or(Timestamp::MIN)
+}
 
 /// Per-call budget ceiling.
 ///
@@ -22,8 +131,8 @@ use crate::cost::CostTracking;
 /// - [`BudgetConstraint::per_query_cap_micro_cents`] — single-call ceiling.
 ///   Violations reject the call before it reaches any paid provider.
 /// - [`BudgetConstraint::per_day_cap_micro_cents`] — rolling-24-hour
-///   ceiling for the calling agent. Enforced against the persisted budget
-///   persisted ledger.
+///   ceiling for the calling agent. Enforced against the timestamped
+///   events in the persisted [`SpendLedger`].
 /// - [`BudgetConstraint::per_agent_cap_micro_cents`] — lifetime cap for
 ///   the calling agent (typically set per-deployment, not per-call).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,28 +185,35 @@ impl BudgetConstraint {
     }
 
     /// Whether this budget would permit a paid call of `spend_micro_cents`
-    /// against a ledger currently showing `ledger` of recorded spend.
+    /// at time `now`, given the calling agent's persisted `ledger`.
     ///
     /// Only paid spend counts toward the caps; free-tier units are
     /// tracked separately for rate-limit enforcement. A cap of `0` is
-    /// treated as "disabled".
+    /// treated as "disabled". The per-day cap is evaluated against the
+    /// rolling 24-hour window ending at `now`; the per-agent cap against
+    /// the ledger's lifetime total.
     #[must_use]
-    pub fn permits(&self, spend_micro_cents: u64, ledger: &CostTracking) -> bool {
+    pub fn permits(&self, spend_micro_cents: u64, ledger: &SpendLedger, now: Timestamp) -> bool {
         if !self.allow_paid_tier && spend_micro_cents > 0 {
             return false;
         }
-        let total = ledger.total_paid_micro_cents();
         if self.per_query_cap_micro_cents > 0 && spend_micro_cents > self.per_query_cap_micro_cents
         {
             return false;
         }
         if self.per_day_cap_micro_cents > 0
-            && total.saturating_add(spend_micro_cents) > self.per_day_cap_micro_cents
+            && ledger
+                .paid_in_day_window_micro_cents(now)
+                .saturating_add(spend_micro_cents)
+                > self.per_day_cap_micro_cents
         {
             return false;
         }
         if self.per_agent_cap_micro_cents > 0
-            && total.saturating_add(spend_micro_cents) > self.per_agent_cap_micro_cents
+            && ledger
+                .lifetime_paid_micro_cents()
+                .saturating_add(spend_micro_cents)
+                > self.per_agent_cap_micro_cents
         {
             return false;
         }
@@ -119,6 +235,14 @@ mod tests {
     use super::*;
     use crate::cost::ProviderSpend;
 
+    fn ts(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn t0() -> Timestamp {
+        ts("2026-07-01T00:00:00Z")
+    }
+
     #[test]
     fn default_is_free_only() {
         let b = BudgetConstraint::default();
@@ -129,33 +253,142 @@ mod tests {
     #[test]
     fn free_only_rejects_any_paid_spend() {
         let b = BudgetConstraint::free_only();
-        assert!(b.permits(0, &CostTracking::default()));
-        assert!(!b.permits(1, &CostTracking::default()));
+        assert!(b.permits(0, &SpendLedger::new(), t0()));
+        assert!(!b.permits(1, &SpendLedger::new(), t0()));
     }
 
     #[test]
     fn phase_zero_default_permits_small_spend() {
         let b = BudgetConstraint::phase_zero_default();
-        assert!(b.permits(100_000, &CostTracking::default()));
+        assert!(b.permits(100_000, &SpendLedger::new(), t0()));
     }
 
     #[test]
     fn per_query_cap_blocks_large_spend() {
         let b = BudgetConstraint::phase_zero_default();
         // $1.00 single call exceeds the $0.05 per-query cap.
-        assert!(!b.permits(10_000_000, &CostTracking::default()));
+        assert!(!b.permits(10_000_000, &SpendLedger::new(), t0()));
     }
 
     #[test]
-    fn per_day_cap_blocks_when_ledger_full() {
+    fn per_day_cap_blocks_within_window() {
         let b = BudgetConstraint::phase_zero_default();
-        let ledger = CostTracking::from_line_items([ProviderSpend::new(
-            "brave",
-            b.per_day_cap_micro_cents,
-            0,
-            1,
-        )]);
-        assert!(!b.permits(1, &ledger));
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), b.per_day_cap_micro_cents);
+        assert!(!b.permits(1, &ledger, t0()));
+        // Still inside the 24h window 23 hours later.
+        assert!(!b.permits(1, &ledger, ts("2026-07-01T23:00:00Z")));
+    }
+
+    #[test]
+    fn per_day_cap_resets_after_window_rolls_over() {
+        // The issue-#30 contract: spend up to the day cap, advance past
+        // 24h, and the full day cap is available again while the lifetime
+        // cap keeps counting.
+        let b = BudgetConstraint {
+            per_query_cap_micro_cents: 0,
+            per_day_cap_micro_cents: 50_000_000,
+            per_agent_cap_micro_cents: 200_000_000,
+            allow_paid_tier: true,
+        };
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), 50_000_000);
+
+        assert!(!b.permits(1, &ledger, t0()));
+
+        let next_day = ts("2026-07-02T01:00:00Z");
+        assert!(b.permits(1, &ledger, next_day));
+        assert!(b.permits(50_000_000, &ledger, next_day));
+        assert!(!b.permits(50_000_001, &ledger, next_day));
+    }
+
+    #[test]
+    fn day_window_is_rolling_not_calendar() {
+        let b = BudgetConstraint {
+            per_query_cap_micro_cents: 0,
+            per_day_cap_micro_cents: 50_000_000,
+            per_agent_cap_micro_cents: 0,
+            allow_paid_tier: true,
+        };
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), 30_000_000);
+        ledger.record(ts("2026-07-01T20:00:00Z"), 20_000_000);
+
+        // At T0+23h both events are in the window: 50M spent, cap reached.
+        assert!(!b.permits(1, &ledger, ts("2026-07-01T23:00:00Z")));
+        // At T0+25h the first event has rolled out: only 20M in window.
+        assert!(b.permits(30_000_000, &ledger, ts("2026-07-02T01:00:00Z")));
+        assert!(!b.permits(30_000_001, &ledger, ts("2026-07-02T01:00:00Z")));
+    }
+
+    #[test]
+    fn lifetime_cap_enforced_across_windows() {
+        let b = BudgetConstraint {
+            per_query_cap_micro_cents: 0,
+            per_day_cap_micro_cents: 50_000_000,
+            per_agent_cap_micro_cents: 200_000_000,
+            allow_paid_tier: true,
+        };
+        let mut ledger = SpendLedger::new();
+        // Four separate days of $5 spend reach the $20 lifetime cap.
+        ledger.record(ts("2026-07-01T00:00:00Z"), 50_000_000);
+        ledger.record(ts("2026-07-03T00:00:00Z"), 50_000_000);
+        ledger.record(ts("2026-07-05T00:00:00Z"), 50_000_000);
+        ledger.record(ts("2026-07-07T00:00:00Z"), 50_000_000);
+
+        // A week later the day window is empty, but lifetime is exhausted.
+        let later = ts("2026-07-14T00:00:00Z");
+        assert_eq!(ledger.paid_in_day_window_micro_cents(later), 0);
+        assert!(!b.permits(1, &ledger, later));
+    }
+
+    #[test]
+    fn prune_expired_preserves_lifetime_and_window_accounting() {
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), 10_000_000);
+        ledger.record(ts("2026-07-02T12:00:00Z"), 5_000_000);
+
+        let now = ts("2026-07-03T00:00:00Z");
+        ledger.prune_expired(now);
+
+        assert_eq!(ledger.events().len(), 1);
+        assert_eq!(ledger.lifetime_paid_micro_cents(), 15_000_000);
+        assert_eq!(ledger.paid_in_day_window_micro_cents(now), 5_000_000);
+    }
+
+    #[test]
+    fn record_ignores_zero_spend() {
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), 0);
+        assert!(ledger.events().is_empty());
+        assert_eq!(ledger.lifetime_paid_micro_cents(), 0);
+    }
+
+    #[test]
+    fn record_cost_folds_call_report() {
+        let mut ledger = SpendLedger::new();
+        let cost = CostTracking::from_line_items([
+            ProviderSpend::new("brave", 300, 0, 1),
+            ProviderSpend::new("exa", 700, 0, 1),
+        ]);
+        ledger.record_cost(t0(), &cost);
+        assert_eq!(ledger.lifetime_paid_micro_cents(), 1_000);
+        assert_eq!(ledger.paid_in_day_window_micro_cents(t0()), 1_000);
+    }
+
+    #[test]
+    fn ledger_saturates_instead_of_overflowing() {
+        let b = BudgetConstraint {
+            per_query_cap_micro_cents: 0,
+            per_day_cap_micro_cents: 0,
+            per_agent_cap_micro_cents: 1_000,
+            allow_paid_tier: true,
+        };
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), u64::MAX - 1);
+        ledger.record(t0(), u64::MAX - 1);
+        assert_eq!(ledger.lifetime_paid_micro_cents(), u64::MAX);
+        assert!(!b.permits(1, &ledger, t0()));
     }
 
     #[test]
@@ -166,9 +399,9 @@ mod tests {
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: true,
         };
-        let big_ledger =
-            CostTracking::from_line_items([ProviderSpend::new("exa", u64::MAX / 2, 0, 1)]);
-        assert!(b.permits(1_000_000, &big_ledger));
+        let mut big_ledger = SpendLedger::new();
+        big_ledger.record(t0(), u64::MAX / 2);
+        assert!(b.permits(1_000_000, &big_ledger, t0()));
     }
 
     #[test]
@@ -179,8 +412,8 @@ mod tests {
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: false,
         };
-        assert!(!b.permits(1, &CostTracking::default()));
-        assert!(b.permits(0, &CostTracking::default()));
+        assert!(!b.permits(1, &SpendLedger::new(), t0()));
+        assert!(b.permits(0, &SpendLedger::new(), t0()));
     }
 
     #[test]
@@ -192,6 +425,17 @@ mod tests {
     }
 
     #[test]
+    fn spend_ledger_serde_round_trip() {
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), 1_234);
+        ledger.record(ts("2026-07-01T12:00:00Z"), 5_678);
+        let json = serde_json::to_string(&ledger).unwrap();
+        let back: SpendLedger = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ledger);
+        assert_eq!(back.lifetime_paid_micro_cents(), 6_912);
+    }
+
+    #[test]
     fn per_agent_cap_stops_lifetime_growth() {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
@@ -199,8 +443,9 @@ mod tests {
             per_agent_cap_micro_cents: 1_000,
             allow_paid_tier: true,
         };
-        let ledger = CostTracking::from_line_items([ProviderSpend::new("x", 999, 0, 1)]);
-        assert!(b.permits(1, &ledger));
-        assert!(!b.permits(2, &ledger));
+        let mut ledger = SpendLedger::new();
+        ledger.record(t0(), 999);
+        assert!(b.permits(1, &ledger, t0()));
+        assert!(!b.permits(2, &ledger, t0()));
     }
 }

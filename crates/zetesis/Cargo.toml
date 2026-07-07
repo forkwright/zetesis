@@ -7,10 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[lints]
-workspace = true
-
 [dependencies]
 elenkhos = { workspace = true }
 sylloge = { workspace = true }
 synopsis = { workspace = true }
+
+[dev-dependencies]
+jiff = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

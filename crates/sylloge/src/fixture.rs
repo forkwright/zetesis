@@ -6,12 +6,20 @@
 
 use std::collections::BTreeSet;
 
+use url::Url;
+
 use crate::{
     CostTracking, DeepDepth, ProvenanceEntry, ProviderSpend, QueryShape, ResearchResult, ResultHit,
 };
 
 const FIXTURE_PROVIDER: &str = "offline_fixture";
 const MAX_RESULTS_PER_ITERATION: usize = 10;
+
+/// URN identifying the fixture's synthesized answer itself. The synthesis
+/// hit is derived material, not a fetched page, so it carries its own
+/// identity instead of borrowing a source URL (which would misattribute
+/// the synthesis to that source).
+const SYNTHESIS_URL: &str = "urn:sylloge:offline-fixture:synthesis";
 
 /// Deterministic seam for generating search queries.
 pub trait QueryGenerator: Send + Sync {
@@ -156,15 +164,24 @@ fn with_synthesis_hit(summary: String, mut source_hits: Vec<ResultHit>) -> Vec<R
         .iter()
         .flat_map(|hit| hit.citations.iter().cloned())
         .collect::<Vec<_>>();
+    if citations.is_empty() {
+        // No sources were retrieved; an uncited synthesis hit would
+        // violate the provenance invariant, so no synthesis is emitted.
+        return source_hits;
+    }
 
-    if let Some(first_citation) = citations.first() {
-        let synthesis = ResultHit::new(
-            "local deep research synthesis",
-            summary,
-            first_citation.source_url.clone(),
-            citations,
-            1.0,
-        );
+    let Ok(synthesis_url) = Url::parse(SYNTHESIS_URL) else {
+        return source_hits;
+    };
+    // INVARIANT: `citations` is verified non-empty above, so construction
+    // cannot fail with MissingCitations.
+    if let Ok(synthesis) = ResultHit::new(
+        "local deep research synthesis",
+        summary,
+        synthesis_url,
+        citations,
+        1.0,
+    ) {
         source_hits.insert(0, synthesis);
     }
 

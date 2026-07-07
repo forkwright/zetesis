@@ -23,7 +23,7 @@ finalization seams. It still needs real local LLM binding, search configuration,
 network-backed DuckDuckGo/SearXNG integration, and endpoint-backed integration
 tests.
 
-## Source Evidence
+## Source evidence
 
 Evidence was checked against upstream source snapshots on 2026-05-25.
 
@@ -33,7 +33,7 @@ Evidence was checked against upstream source snapshots on 2026-05-25.
 | `assafelovic/gpt-researcher` | `92bfc03` | Reuse the adapter shape only. | The generic LLM registry includes `vllm_openai`, wired through `VLLM_OPENAI_API_KEY` and `VLLM_OPENAI_API_BASE`. That maps cleanly to logismos or llama.cpp OpenAI-compatible endpoints. |
 | `langchain-ai/open_deep_research` | `4b61120` | Do not adopt. | `SearchAPI` is limited to `anthropic`, `openai`, `tavily`, and `none`, with Tavily as the default. Its model defaults are OpenAI model strings. That search/model default is the wrong sovereignty posture for zetesis. |
 
-## Implementation Notes
+## Implementation notes
 
 - Default inference target: logismos-compatible OpenAI endpoint, initially
   expected at `http://127.0.0.1:8000/v1`.
@@ -48,7 +48,7 @@ Evidence was checked against upstream source snapshots on 2026-05-25.
   stable cache key. Do not add a parallel `{ summary, citations,
   knowledge_gaps }` result type unless the public API is deliberately revised.
 
-## Remaining Backend Work
+## Remaining backend work
 
 The remaining non-fixture `LocalDeepResearch` implementation should include:
 
