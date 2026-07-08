@@ -1,8 +1,3 @@
-# WHY: Block merges on known vulnerabilities and license/source/ban
-# violations. Runs `cargo audit` (RustSec DB) and `cargo deny check`
-# (licenses, sources, bans, advisories) on every PR and daily against main
-# so newly-published CVEs against existing deps are caught even when no PR
-# is open.
 name: Security
 
 on:
@@ -20,49 +15,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  cargo-deny:
-    # WHY: checks licenses, banned crates, source registries, and the
-    # RustSec advisory DB using deny.toml's ignore list. Any finding fails
-    # the job; suppressions require a config entry with a reason.
-    name: cargo deny
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
-        with:
-          command: check advisories licenses bans sources
-          arguments: --all-features
-
-  cargo-audit:
-    # WHY: cargo-deny's advisories check overlaps but uses a different code
-    # path; running cargo-audit independently protects against config drift.
-    name: cargo audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      # WHY: install a PREBUILT cargo-audit binary, not `cargo install` from
-      # source — a source build couples cargo-audit's ever-climbing MSRV to
-      # this repo's pinned toolchain (rust-toolchain 1.85), which fails both
-      # ways (0.22 needs rustc 1.88; 0.21's rustsec can't parse CVSS-4.0
-      # advisories now in the DB). The prebuilt binary is toolchain-independent.
-      # See kanon#2385.
-      - uses: taiki-e/install-action@a416ddeedbd372e614cc1386e8b642692f66865e # v2
-        with:
-          tool: cargo-audit@0.22.2
-      - name: cargo audit
-        # WHY: -D unmaintained,unsound,yanked escalates those categories
-        # to errors. Suppressions go through .cargo/audit.toml.
-        run: cargo audit --deny unmaintained --deny unsound --deny yanked
+  security:
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    # WHY: thin caller of the fleet-canonical reusable (cargo-deny + prebuilt
+    # cargo-audit + osv-scanner) instead of a fourth copy-pasted inline block —
+    # one fact, one place. Pin includes the prebuilt-cargo-audit fix (#8) that
+    # unbroke MSRV-pinned repos like this one (kanon#2385).
+    uses: forkwright/.github/.github/workflows/security.yml@764a84135ce378865ade02894a93db3a48042950
+    with:
+      has_private_deps: false
+      run_osv: true
+      cargo_audit_timeout_minutes: 15
