@@ -56,3 +56,28 @@ Current planning authority lives in the internal project state record. This publ
 ## License
 
 AGPL-3.0-or-later
+
+<!-- kanon:auto-start -->
+## Repository Metadata
+
+- Registry name: `zetesis`
+- Description: Kanon-managed forkwright repository `zetesis`.
+- Forge repo: `forkwright/zetesis`
+- Kanon prefix: `ze`
+- Config source: `workflow/kanon.toml [projects.zetesis]`
+- Planning state: `projects/zetesis/STATE.md`
+- Last state update: `2026-05-25`
+
+Run `kanon docs sync --check --repo zetesis` to verify this generated
+section and `kanon docs sync --apply --repo zetesis` to refresh it.
+
+## Blast zone
+
+- Paths explicitly named by the rendered prompt, role, or template input.
+
+## Acceptance verifier
+
+```bash
+kanon gate
+```
+<!-- kanon:auto-end -->

@@ -51,3 +51,27 @@ Zetesis has at least three active/planned fleet consumers (aletheia, dioptron, a
 | heurēma | Future semantic rerank of Tier 0 results |
 | menos-ops | `menos gpu research` mode owner |
 | hermeneus (inside aletheia) | Sibling primitive: hermeneus unifies LLM providers, zetesis unifies research providers |
+
+<!-- kanon:auto-start -->
+## Generated kanon context
+
+- Registry name: `zetesis`
+- Forge repo: `forkwright/zetesis`
+- Kanon prefix: `ze`
+- Config source: `workflow/kanon.toml [projects.zetesis]`
+- Standards source: `crates/basanos/standards/STANDARDS.md`
+- MCP routing catalog: `workflow/AGENTS-mcp-tools.md`
+
+Run `kanon docs sync --check --repo zetesis` to verify this generated
+section and `kanon docs sync --apply --repo zetesis` to refresh it.
+
+## Blast zone
+
+- Paths explicitly named by the rendered prompt, role, or template input.
+
+## Acceptance verifier
+
+```bash
+kanon gate
+```
+<!-- kanon:auto-end -->
