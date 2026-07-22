@@ -1,3 +1,23 @@
+# WHY(kanon#2522): replaces the org-default trailer-only passthrough
+# (forkwright/.github/.github/workflows/gate-attestation.yml@5be130b — pure
+# trailer verify, no ai-attribution, no doc-only exemption) with the fleet
+# hybrid gate. A trailer-stamped PR takes the fast path; a trailer-less PR
+# falls through to a real fmt/check/clippy/nextest build; a docs-only PR is
+# exempt from that build; ai-attribution runs unconditionally via the
+# reusable workflow's own centralized job (no repo-local duplicate needed).
+#
+# UNVERIFIED: zetesis has no ci.yml today (only the passthrough this file
+# replaces), so these command strings are NOT confirmed against a
+# currently-green CI run -- they mirror the reusable workflow's own fleet
+# defaults for a 4-crate workspace (zetesis/sylloge/elenkhos/synopsis).
+# zetesis's workspace.lints.clippy sets unwrap_used = "deny" and
+# expect_used = "deny", so clippy is strict here. Watch full-gate-build
+# actually go green on the adoption PR before trusting this block the way
+# harmonia's and epistole's are (those mirror a currently-passing ci.yml).
+#
+# rust_toolchain input intentionally omitted (stays default ""): zetesis
+# carries its own rust-toolchain.toml (channel "1.85"), auto-detected by
+# actions-rust-lang/setup-rust-toolchain inside the reusable workflow.
 name: Gate Attestation
 
 on:
@@ -7,10 +27,18 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   gate:
-    uses: forkwright/.github/.github/workflows/gate-attestation.yml@5be130bfebd5165d3221f1896f96b5ce6e93bf9b
+    uses: forkwright/.github/.github/workflows/hybrid-gate.yml@main
+    with:
+      fmt_cmd: "cargo fmt --all -- --check"
+      check_cmd: "cargo check --workspace --all-targets"
+      clippy_cmd: "cargo clippy --workspace --all-targets -- -D warnings"
+      nextest_cmd: "cargo nextest run --workspace"
+      doctest_cmd: ""
+      system_packages: ""
+      needs_fleet_repo_token: false
+      rust_cache_key: "gate-attestation"
+      ai_attribution_check: true
+      docs_only_exemption: true
+    secrets: inherit
