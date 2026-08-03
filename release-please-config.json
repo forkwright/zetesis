@@ -55,17 +55,7 @@
                 {
                     "type": "toml",
                     "path": "Cargo.toml",
-                    "jsonpath": "$.workspace.dependencies.elenkhos.version"
-                },
-                {
-                    "type": "toml",
-                    "path": "Cargo.toml",
-                    "jsonpath": "$.workspace.dependencies.sylloge.version"
-                },
-                {
-                    "type": "toml",
-                    "path": "Cargo.toml",
-                    "jsonpath": "$.workspace.dependencies.synopsis.version"
+                    "jsonpath": "$.workspace.dependencies[?(@.path)].version"
                 },
                 {
                     "type": "toml",
