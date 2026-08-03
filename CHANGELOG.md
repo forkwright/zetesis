@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.4](https://github.com/forkwright/zetesis/compare/v0.0.3...v0.0.4) (2026-08-03)
+
+
+### Bug Fixes
+
+* **gate-attestation:** scope a documented concurrency suppression ([#57](https://github.com/forkwright/zetesis/issues/57)) ([dcdaeea](https://github.com/forkwright/zetesis/commit/dcdaeea97d4a15b043811b68b4d70bb2398a1bbd)), closes [#44](https://github.com/forkwright/zetesis/issues/44)
+* **release:** derive the path-dep version pins release-please patches ([#54](https://github.com/forkwright/zetesis/issues/54)) ([357751b](https://github.com/forkwright/zetesis/commit/357751bdcf978f7c81ec72a2c717787710a3b8a0))
+
 ## [0.0.3](https://github.com/forkwright/zetesis/compare/v0.0.2...v0.0.3) (2026-07-29)
 
 
