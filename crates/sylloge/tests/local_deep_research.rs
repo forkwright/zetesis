@@ -113,6 +113,59 @@ async fn completed_task_fetches_original_result_envelope() {
 }
 
 #[tokio::test]
+async fn cancel_task_rejects_an_already_ready_task_without_discarding_its_result() {
+    // WHY(zetesis#49): cancel_task previously overwrote ANY task's status
+    // unconditionally, including a completed one -- cancelling a Ready
+    // task silently wiped its result. Cancellation of a finished task must
+    // be rejected instead.
+    let backend = LocalDeepResearch::new();
+    let task = backend.submit("q", DeepDepth::Deep).await.unwrap();
+    let result = sample_result("q");
+    backend.complete_task(&task, result.clone(), ts()).unwrap();
+
+    let err = backend.cancel_task(&task).unwrap_err();
+    assert!(err.is_permanent());
+
+    // The result must still be intact and fetchable.
+    assert!(backend.poll(&task).await.unwrap().is_ready());
+    assert_eq!(backend.fetch(&task).await.unwrap(), result);
+}
+
+#[tokio::test]
+async fn cancel_task_rejects_an_already_failed_task() {
+    let backend = LocalDeepResearch::new();
+    let task = backend.submit("q", DeepDepth::Standard).await.unwrap();
+    backend.fail_task(&task, "fixture failure").unwrap();
+
+    let err = backend.cancel_task(&task).unwrap_err();
+    assert!(err.is_permanent());
+    // The original failure reason must still be the one reported.
+    let fetch_err = backend.fetch(&task).await.unwrap_err();
+    assert!(fetch_err.to_string().contains("fixture failure"));
+}
+
+#[tokio::test]
+async fn cancel_task_is_idempotent_for_an_already_cancelled_task() {
+    let backend = LocalDeepResearch::new();
+    let task = backend.submit("q", DeepDepth::Standard).await.unwrap();
+
+    backend.cancel_task(&task).unwrap();
+    // WHY: a second cancel of the same task must succeed, not error --
+    // that is what "idempotent" means for the trait-level contract.
+    backend.cancel_task(&task).unwrap();
+
+    assert!(backend.poll(&task).await.unwrap().is_terminal());
+}
+
+#[tokio::test]
+async fn cancel_reachable_through_dyn_deep_research_delegates_to_cancel_task() {
+    let backend: Arc<dyn DeepResearch> = Arc::new(LocalDeepResearch::new());
+    let task = backend.submit("q", DeepDepth::Standard).await.unwrap();
+    backend.cancel(&task).await.unwrap();
+    assert!(backend.poll(&task).await.unwrap().is_terminal());
+}
+
+#[tokio::test]
 async fn failed_and_cancelled_tasks_are_terminal_and_unfetchable() {
     let backend = LocalDeepResearch::new();
     let failed = backend.submit("failed", DeepDepth::Standard).await.unwrap();

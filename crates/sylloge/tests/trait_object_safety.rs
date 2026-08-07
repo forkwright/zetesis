@@ -94,6 +94,14 @@ impl DeepResearch for StubDeep {
             ))
         })
     }
+
+    fn cancel<'a>(&'a self, _task: &'a TaskId) -> BoxFut<'a, Result<()>> {
+        // WHY: StubDeep is stateless (no task store), so there is nothing
+        // to transition -- this only proves `cancel` is reachable through
+        // `Arc<dyn DeepResearch>` (see deep_research_is_dyn_compatible).
+        // LocalDeepResearch::cancel exercises the real per-state contract.
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 struct StubCrawler;
@@ -148,6 +156,7 @@ async fn deep_research_is_dyn_compatible() {
     let result = dr.fetch(&task).await.unwrap();
     assert_eq!(result.hits.len(), 0);
     assert_eq!(dr.name(), "stub-deep");
+    dr.cancel(&task).await.unwrap();
 }
 
 #[tokio::test]
