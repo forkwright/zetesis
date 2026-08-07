@@ -6,11 +6,13 @@
 //! possible error value, and that the selectors are usable through the
 //! re-exported paths a downstream crate will actually use.
 
+#![expect(clippy::unwrap_used, reason = "test assertions must fail loudly")]
+
 use sylloge::{
-    BudgetExceededSnafu, DomainDeniedSnafu, Error, FatalCorruptionSnafu, InvalidQuerySnafu,
-    MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu, ProviderFailureSnafu,
-    QuotaExhaustedSnafu, RateLimitedSnafu, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu,
-    TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
+    BudgetExceededSnafu, BudgetScope, DomainDeniedSnafu, Error, FatalCorruptionSnafu,
+    InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu,
+    ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, TaskNotReadySnafu,
+    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
 };
 
 fn all_variants() -> Vec<Error> {
@@ -26,8 +28,11 @@ fn all_variants() -> Vec<Error> {
         }
         .build(),
         BudgetExceededSnafu {
+            scope: BudgetScope::PerQuery,
             attempted_micro_cents: 1_u64,
             cap_micro_cents: 0_u64,
+            remaining_micro_cents: 0_u64,
+            resets_at: None,
         }
         .build(),
         QuotaExhaustedSnafu {
@@ -207,4 +212,32 @@ fn permanent_set_is_expected_members() {
             "Unsupported"
         ]
     );
+}
+
+#[test]
+fn budget_exceeded_classification_depends_on_reset_time() {
+    // WHY(zetesis#47): a single variant carries two retry classes
+    // depending on whether the violated scope has a reset time -- the
+    // per-variant sets above use a single `resets_at: None` instance, so
+    // this test covers the other branch through the same re-exported
+    // path callers use.
+    let query_cap: Error = BudgetExceededSnafu {
+        scope: BudgetScope::PerQuery,
+        attempted_micro_cents: 1_u64,
+        cap_micro_cents: 0_u64,
+        remaining_micro_cents: 0_u64,
+        resets_at: None,
+    }
+    .build();
+    assert!(query_cap.is_permanent());
+
+    let fleet_day: Error = BudgetExceededSnafu {
+        scope: BudgetScope::PerFleetDay,
+        attempted_micro_cents: 1_u64,
+        cap_micro_cents: 100_u64,
+        remaining_micro_cents: 0_u64,
+        resets_at: Some("2026-07-02T00:00:00Z".parse().unwrap()),
+    }
+    .build();
+    assert!(fleet_day.is_transient());
 }

@@ -50,7 +50,7 @@ mod result;
 mod serde_util;
 mod tier;
 
-pub use budget::{BudgetConstraint, DAY_WINDOW, SpendEvent, SpendLedger};
+pub use budget::{BudgetConstraint, BudgetScope, DAY_WINDOW, SpendEvent, SpendLedger};
 pub use citation::{Citation, SourceKind};
 pub use constraints::{DeepDepth, PageContent, ResearchStatus, SearchConstraints, TaskId};
 pub use cost::{CostTracking, ProviderId, ProviderSpend};

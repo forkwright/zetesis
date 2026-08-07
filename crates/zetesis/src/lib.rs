@@ -4,15 +4,15 @@
 
 pub use elenkhos as steelman;
 pub use sylloge::{
-    BoxFut, BudgetConstraint, BudgetExceededSnafu, Citation, CostTracking, Crawler, DAY_WINDOW,
-    DeepDepth, DeepResearch, DomainDeniedSnafu, Error, ErrorClass, FatalCorruptionSnafu,
-    InvalidQuerySnafu, LocalDeepResearch, MissingCitationsSnafu, OfflineFixture,
-    OversizedPayloadSnafu, PageContent, PermanentIoSnafu, ProvenanceEntry, Provider,
-    ProviderFailureSnafu, ProviderId, ProviderSpend, ProviderTier, QueryGenerator, QueryShape,
-    QuotaExhaustedSnafu, RateLimitedSnafu, ResearchResult, ResearchStatus, Result, ResultHit,
-    SearchConstraints, SourceKind, SourceRetriever, SpendEvent, SpendLedger, Synthesizer, TaskId,
-    TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu,
-    UnsupportedSnafu,
+    BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation, CostTracking, Crawler,
+    DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, Error, ErrorClass,
+    FatalCorruptionSnafu, InvalidQuerySnafu, LocalDeepResearch, MissingCitationsSnafu,
+    OfflineFixture, OversizedPayloadSnafu, PageContent, PermanentIoSnafu, ProvenanceEntry,
+    Provider, ProviderFailureSnafu, ProviderId, ProviderSpend, ProviderTier, QueryGenerator,
+    QueryShape, QuotaExhaustedSnafu, RateLimitedSnafu, ResearchResult, ResearchStatus, Result,
+    ResultHit, SearchConstraints, SourceKind, SourceRetriever, SpendEvent, SpendLedger,
+    Synthesizer, TaskId, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu,
+    UnauthorizedSnafu, UnsupportedSnafu,
 };
 pub use synopsis as briefing;
 
