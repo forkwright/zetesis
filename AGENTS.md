@@ -24,11 +24,11 @@ Phase 1 scaffold. Four-crate workspace is present: `zetesis`, `sylloge`, `elenkh
 `sylloge` owns the provider/result/budget/citation/deep-research surface. `zetesis` re-exports it as the facade.
 `elenkhos` and `synopsis` are marker-type scaffolds holding their crate boundary.
 `LocalDeepResearch` has the in-memory task lifecycle and offline five-node loop fixture for deterministic testing without network calls.
-Real logismos/HTTP integration is deferred — tracked in issue #10.
+Real logismos/HTTP integration is deferred — see `_llm/current_state.toml` `[[open_threads]]` for current tracker status.
 
 ## Open work
 
-- **#10** `LocalDeepResearch` HTTP backend: logismos `vllm_openai` adapter, DuckDuckGo/SearXNG HTTP clients, mock-endpoint integration tests. Deferred pending real-HTTP integration.
+See `_llm/current_state.toml` `[[open_threads]]` — the single authoritative record of open implementation trackers. Do not restate issue numbers or status here; a second authored copy is what let this section cite a closed issue as open work.
 
 ## Gate
 

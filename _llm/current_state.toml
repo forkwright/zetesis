@@ -11,7 +11,7 @@ source_docs = [
 [state]
 summary = "Zetesis is a Phase 1 scaffold repo with the locked four-crate workspace, translated sylloge provider/result/budget/deep-research surface, LocalDeepResearch in-memory lifecycle, and offline five-node loop fixture."
 current_phase = "Phase 1: scaffold."
-updated = "2026-05-26"
+updated = "2026-08-07"
 
 [[recent]]
 date = "2026-05-26"
@@ -39,5 +39,4 @@ item = "Scope, four-crate decomposition, free-first provider tiers, and consumer
 
 [[open_threads]]
 name = "LocalDeepResearch HTTP backend"
-issue = 10
-status = "logismos vllm_openai adapter, DuckDuckGo/SearXNG HTTP clients, and mock-endpoint integration tests not yet implemented. Offline fixture layer is in place."
+status = "No open GitHub issue currently tracks this (#10 closed 2026-05-29 as trait-contract complete; the remaining backend work was left untracked, which is the defect fixed in #58). Remaining scope: logismos vllm_openai adapter, DuckDuckGo/SearXNG HTTP clients, mock-endpoint integration tests. Offline fixture layer is in place. File a new issue before resuming this work and record its number in this field."
