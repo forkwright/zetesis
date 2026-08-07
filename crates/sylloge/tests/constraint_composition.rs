@@ -14,7 +14,10 @@ use std::time::Duration;
 use jiff::Timestamp;
 use url::Url;
 
-use sylloge::{BudgetConstraint, SearchConstraints, SpendLedger};
+use sylloge::{
+    BudgetConstraint, Citation, FreshnessBasis, FreshnessPolicy, PublicationPrecision,
+    PublicationProvenance, PublicationTime, SearchConstraints, SourceKind, SpendLedger,
+};
 
 fn now() -> Timestamp {
     "2026-07-01T00:00:00Z".parse().unwrap()
@@ -108,4 +111,66 @@ fn language_tag_preserves_subtags() {
     assert!(json.contains("zh-Hant-TW"));
     let back: SearchConstraints = serde_json::from_str(&json).unwrap();
     assert_eq!(back.language.as_ref().unwrap().as_str(), "zh-Hant-TW");
+}
+
+#[test]
+fn evaluate_freshness_no_window_always_accepts() {
+    let c = SearchConstraints::default();
+    let citation = Citation::new(
+        Url::parse("https://example.org/").unwrap(),
+        "2020-01-01T00:00:00Z".parse().unwrap(),
+        SourceKind::Web,
+        1.0,
+        None,
+    );
+    let decision = c.evaluate_freshness(&citation, "2026-08-01T00:00:00Z".parse().unwrap());
+    assert!(decision.accepted);
+    assert_eq!(decision.basis, FreshnessBasis::NoWindowConfigured);
+}
+
+#[test]
+fn evaluate_freshness_rejects_old_publication_despite_recent_retrieval() {
+    // WHY(zetesis#50): a citation freshly retrieved but describing
+    // year-old content must not pass a freshness window on the strength
+    // of accessed_at alone.
+    let at_now: Timestamp = "2026-08-01T00:00:00Z".parse().unwrap();
+    let c = SearchConstraints::new(10, BudgetConstraint::default())
+        .with_freshness(Duration::from_secs(86_400));
+    let citation = Citation::new(
+        Url::parse("https://example.org/").unwrap(),
+        at_now, // retrieved right now
+        SourceKind::Web,
+        1.0,
+        None,
+    )
+    .with_published_at(PublicationTime::Known {
+        at: "2025-01-01T00:00:00Z".parse().unwrap(),
+        precision: PublicationPrecision::Exact,
+        provenance: PublicationProvenance::ProviderDeclared,
+    });
+    let decision = c.evaluate_freshness(&citation, at_now);
+    assert!(!decision.accepted);
+    assert_eq!(decision.basis, FreshnessBasis::PublicationTime);
+}
+
+#[test]
+fn evaluate_freshness_unknown_time_respects_configured_policy() {
+    let at_now: Timestamp = "2026-08-01T00:00:00Z".parse().unwrap();
+    let citation = Citation::new(
+        Url::parse("https://example.org/").unwrap(),
+        at_now,
+        SourceKind::Web,
+        1.0,
+        None,
+    );
+
+    let strict = SearchConstraints::new(10, BudgetConstraint::default())
+        .with_freshness(Duration::from_secs(86_400))
+        .with_freshness_policy(FreshnessPolicy::Strict);
+    assert!(!strict.evaluate_freshness(&citation, at_now).accepted);
+
+    let permissive = SearchConstraints::new(10, BudgetConstraint::default())
+        .with_freshness(Duration::from_secs(86_400))
+        .with_freshness_policy(FreshnessPolicy::Permissive);
+    assert!(permissive.evaluate_freshness(&citation, at_now).accepted);
 }

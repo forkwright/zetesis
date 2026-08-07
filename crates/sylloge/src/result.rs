@@ -15,6 +15,7 @@ use url::Url;
 use crate::citation::Citation;
 use crate::cost::{CostTracking, ProviderId};
 use crate::error::{MissingCitationsSnafu, OversizedPayloadSnafu, Result};
+use crate::freshness::FreshnessDecision;
 use crate::query::QueryShape;
 
 /// Single result item from a research call.
@@ -59,6 +60,15 @@ pub struct ResultHit {
     /// (DOI, author list, venue, publication year, etc.). Keyed alphabetically
     /// for deterministic serialization.
     pub metadata: BTreeMap<String, Value>,
+
+    /// The freshness-enforcement receipt, if a
+    /// [`crate::SearchConstraints::freshness_window`] was evaluated against
+    /// this hit's primary citation. `None` when no freshness window was
+    /// configured or evaluation has not run. Set via
+    /// [`ResultHit::with_freshness`]. `#[serde(default)]` so payloads
+    /// persisted before this field existed decode as `None`.
+    #[serde(default)]
+    pub freshness: Option<FreshnessDecision>,
 }
 
 impl ResultHit {
@@ -105,6 +115,7 @@ impl ResultHit {
             citations,
             score,
             metadata: BTreeMap::new(),
+            freshness: None,
         })
     }
 
@@ -132,6 +143,14 @@ impl ResultHit {
     #[must_use]
     pub fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+
+    /// Builder-style: attach a freshness-enforcement receipt (see
+    /// [`ResultHit::freshness`]).
+    #[must_use]
+    pub fn with_freshness(mut self, decision: FreshnessDecision) -> Self {
+        self.freshness = Some(decision);
         self
     }
 
@@ -412,6 +431,24 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, ["doi", "year"]);
+    }
+
+    #[test]
+    fn new_hit_has_no_freshness_receipt_until_evaluated() {
+        assert!(hit("t", 0.8).freshness.is_none());
+    }
+
+    #[test]
+    fn with_freshness_attaches_the_receipt() {
+        use crate::freshness::{FreshnessBasis, FreshnessDecision, FreshnessPolicy};
+
+        let decision = FreshnessDecision {
+            accepted: false,
+            policy: FreshnessPolicy::Strict,
+            basis: FreshnessBasis::UnknownRejected,
+        };
+        let hit = hit("t", 0.8).with_freshness(decision);
+        assert_eq!(hit.freshness, Some(decision));
     }
 
     #[test]

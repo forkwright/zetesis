@@ -10,6 +10,8 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::freshness::PublicationTime;
+
 /// Kind of source material a citation points at.
 ///
 /// Used by the router to weight results (a peer-reviewed [`SourceKind::Journal`]
@@ -100,8 +102,23 @@ pub struct Citation {
     /// parse as a valid URL.
     pub source_url: Url,
 
-    /// Timestamp the provider returned the hit to zetesis.
+    /// Timestamp the provider returned the hit to zetesis. This is
+    /// retrieval time only -- it says nothing about when the underlying
+    /// material was published or last updated. See
+    /// [`Citation::published_at`] for that fact, and
+    /// [`crate::evaluate_freshness`] for why the two are never
+    /// interchangeable.
     pub accessed_at: Timestamp,
+
+    /// When the underlying material was published or last updated, if
+    /// known. Defaults to [`PublicationTime::Unknown`] both at
+    /// construction and at the deserialization boundary (`#[serde(default)]`
+    /// -- payloads persisted before this field existed decode as
+    /// `Unknown`, not a deserialization error). Set via
+    /// [`Citation::with_published_at`]. Distinct from
+    /// [`Citation::accessed_at`].
+    #[serde(default)]
+    pub published_at: PublicationTime,
 
     /// Kind of source the URL points at.
     pub source_kind: SourceKind,
@@ -141,10 +158,19 @@ impl Citation {
         Self {
             source_url,
             accessed_at,
+            published_at: PublicationTime::default(),
             source_kind,
             confidence,
             content_type,
         }
+    }
+
+    /// Builder: attach the material's publication/update time. See
+    /// [`Citation::published_at`].
+    #[must_use]
+    pub fn with_published_at(mut self, published_at: PublicationTime) -> Self {
+        self.published_at = published_at;
+        self
     }
 
     /// Whether this citation carries an authoritative source kind with
@@ -264,5 +290,26 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: Citation = serde_json::from_str(&json).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn new_defaults_published_at_to_unknown() {
+        // WHY(zetesis#50): a citation must never silently claim a
+        // publication time it was not given -- accessed_at is retrieval
+        // time only.
+        let c = Citation::new(sample_url(), sample_ts(), SourceKind::Web, 1.0, None);
+        assert_eq!(c.published_at, crate::PublicationTime::Unknown);
+    }
+
+    #[test]
+    fn with_published_at_sets_the_field() {
+        let published = crate::PublicationTime::Known {
+            at: sample_ts(),
+            precision: crate::PublicationPrecision::Exact,
+            provenance: crate::PublicationProvenance::ProviderDeclared,
+        };
+        let c = Citation::new(sample_url(), sample_ts(), SourceKind::Journal, 1.0, None)
+            .with_published_at(published.clone());
+        assert_eq!(c.published_at, published);
     }
 }

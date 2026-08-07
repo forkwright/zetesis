@@ -19,7 +19,9 @@ use snafu::ensure;
 use url::Url;
 
 use crate::BudgetConstraint;
+use crate::citation::Citation;
 use crate::error::{OversizedPayloadSnafu, Result};
+use crate::freshness::{self, FreshnessBasis, FreshnessDecision, FreshnessPolicy};
 
 /// Per-call constraints supplied by the caller.
 ///
@@ -33,10 +35,20 @@ pub struct SearchConstraints {
     /// can't honour this exactly must return at most this many.
     pub max_results: usize,
 
-    /// Only accept hits whose `accessed_at` (or the provider's equivalent
-    /// publish timestamp) falls within the last `freshness_window`. `None`
-    /// means no freshness filter.
+    /// Only accept hits whose [`crate::Citation::published_at`] falls
+    /// within the last `freshness_window`, subject to `freshness_policy`
+    /// when it is [`crate::PublicationTime::Unknown`]. `None` means no
+    /// freshness filter. See [`SearchConstraints::evaluate_freshness`] for
+    /// the enforcement rule -- retrieval time
+    /// ([`crate::Citation::accessed_at`]) is never treated as content
+    /// freshness on its own.
     pub freshness_window: Option<Duration>,
+
+    /// How to treat a citation with [`crate::PublicationTime::Unknown`]
+    /// when `freshness_window` is set. Defaults to
+    /// [`FreshnessPolicy::Strict`]. Irrelevant when `freshness_window` is
+    /// `None`.
+    pub freshness_policy: FreshnessPolicy,
 
     /// Preferred content language (BCP-47 language tag). Providers that
     /// don't support language filtering ignore this field.
@@ -66,6 +78,7 @@ impl SearchConstraints {
         Self {
             max_results,
             freshness_window: None,
+            freshness_policy: FreshnessPolicy::default(),
             language: None,
             domain_allowlist: None,
             domain_denylist: None,
@@ -77,6 +90,14 @@ impl SearchConstraints {
     #[must_use]
     pub fn with_freshness(mut self, window: Duration) -> Self {
         self.freshness_window = Some(window);
+        self
+    }
+
+    /// Builder: set the unknown-publication-time policy (see
+    /// [`SearchConstraints::freshness_policy`]).
+    #[must_use]
+    pub fn with_freshness_policy(mut self, policy: FreshnessPolicy) -> Self {
+        self.freshness_policy = policy;
         self
     }
 
@@ -124,6 +145,29 @@ impl SearchConstraints {
             return allow.iter().any(|suffix| matches_suffix(host, suffix));
         }
         true
+    }
+
+    /// Evaluate `citation` against `freshness_window` and
+    /// `freshness_policy` as of `now`. `freshness_window: None` always
+    /// accepts. This is the single enforcement point for the freshness
+    /// window -- see [`crate::evaluate_freshness`] for the rule applied
+    /// once a window is configured.
+    #[must_use]
+    pub fn evaluate_freshness(&self, citation: &Citation, now: Timestamp) -> FreshnessDecision {
+        let Some(window) = self.freshness_window else {
+            return FreshnessDecision {
+                accepted: true,
+                policy: self.freshness_policy,
+                basis: FreshnessBasis::NoWindowConfigured,
+            };
+        };
+        freshness::evaluate_freshness(
+            &citation.published_at,
+            citation.accessed_at,
+            window,
+            self.freshness_policy,
+            now,
+        )
     }
 }
 
@@ -416,6 +460,7 @@ mod tests {
         assert_eq!(c.max_results, 10);
         assert!(!c.budget.allow_paid_tier);
         assert!(c.freshness_window.is_none());
+        assert_eq!(c.freshness_policy, FreshnessPolicy::Strict);
     }
 
     #[test]
