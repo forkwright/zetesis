@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.5](https://github.com/forkwright/zetesis/compare/v0.0.4...v0.0.5) (2026-08-09)
+
+
+### Bug Fixes
+
+* **docs:** stop citing closed [#10](https://github.com/forkwright/zetesis/issues/10) as zetesis open work ([#62](https://github.com/forkwright/zetesis/issues/62)) ([924e196](https://github.com/forkwright/zetesis/commit/924e196fe3ee3dd092d4e0724e6056a6c7ee301c)), closes [#58](https://github.com/forkwright/zetesis/issues/58)
+* **sylloge:** make budget check-and-record atomic, add fleet scope and a custom-budget builder ([#59](https://github.com/forkwright/zetesis/issues/59)) ([1795570](https://github.com/forkwright/zetesis/commit/1795570d5804adbc634589f89b404d34cf55eaca)), closes [#47](https://github.com/forkwright/zetesis/issues/47)
+* **sylloge:** promote deep-research cancellation to the trait, make it state-aware ([#60](https://github.com/forkwright/zetesis/issues/60)) ([36bebff](https://github.com/forkwright/zetesis/commit/36bebffb10b08c8c626f7874360b806d24d18226)), closes [#49](https://github.com/forkwright/zetesis/issues/49)
+* **sylloge:** separate publication time from retrieval time in freshness checks ([#61](https://github.com/forkwright/zetesis/issues/61)) ([e478aaf](https://github.com/forkwright/zetesis/commit/e478aaf2dd082978596fb3e30bc333cf05e75968)), closes [#50](https://github.com/forkwright/zetesis/issues/50)
+
 ## [0.0.4](https://github.com/forkwright/zetesis/compare/v0.0.3...v0.0.4) (2026-08-03)
 
 
