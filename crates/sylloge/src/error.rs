@@ -10,7 +10,10 @@
 //! § Error Handling: transient (retry-safe), permanent (don't retry),
 //! fatal (corruption / operator intervention required).
 
+use jiff::Timestamp;
 use snafu::Snafu;
+
+use crate::budget::BudgetScope;
 
 /// Per-crate `Result` alias.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -58,13 +61,26 @@ pub enum Error {
     /// attempted call. No provider call was made; the router short-circuited
     /// at the budget layer.
     #[snafu(display(
-        "budget exceeded: attempted spend {attempted_micro_cents} micro-cents against cap {cap_micro_cents}"
+        "budget exceeded ({scope:?}): attempted spend {attempted_micro_cents} micro-cents against cap {cap_micro_cents} ({remaining_micro_cents} remaining)"
     ))]
     BudgetExceeded {
+        /// Which configured ceiling was violated.
+        scope: BudgetScope,
         /// Paid spend the router attempted (micro-cents).
         attempted_micro_cents: u64,
         /// Cap that would have been breached (micro-cents).
         cap_micro_cents: u64,
+        /// Allowance remaining in `scope` before this attempt, in
+        /// micro-cents (i.e. what a smaller request could still spend).
+        remaining_micro_cents: u64,
+        /// For a rolling-window scope ([`BudgetScope::PerConsumerDay`],
+        /// [`BudgetScope::PerFleetDay`]), the instant the window next has
+        /// room. `None` for scopes with no reset
+        /// ([`BudgetScope::PerQuery`], [`BudgetScope::PerAgentLifetime`],
+        /// [`BudgetScope::PaidTierDisabled`]) -- see
+        /// [`Error::is_transient`], which uses this field to classify the
+        /// denial.
+        resets_at: Option<Timestamp>,
         /// Source location captured at the point the error was built.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -293,13 +309,23 @@ impl Error {
     #[must_use]
     pub fn class(&self) -> ErrorClass {
         match self {
+            // WHY(zetesis#47): a rolling-window BudgetExceeded (consumer-day,
+            // fleet-day) genuinely clears at `resets_at` -- retryable, like
+            // QuotaExhausted. A query-cap, lifetime-cap, or paid-tier-disabled
+            // denial (resets_at: None) never clears on its own and falls
+            // into the Permanent arm below instead.
             Self::ProviderFailure { .. }
             | Self::RateLimited { .. }
             | Self::QuotaExhausted { .. }
             | Self::Timeout { .. }
             | Self::TransientIo { .. }
-            | Self::TaskNotReady { .. } => ErrorClass::Transient,
-            Self::BudgetExceeded { .. }
+            | Self::TaskNotReady { .. }
+            | Self::BudgetExceeded {
+                resets_at: Some(_), ..
+            } => ErrorClass::Transient,
+            Self::BudgetExceeded {
+                resets_at: None, ..
+            }
             | Self::Unauthorized { .. }
             | Self::InvalidQuery { .. }
             | Self::PermanentIo { .. }
@@ -342,14 +368,33 @@ mod tests {
     }
 
     #[test]
-    fn budget_exceeded_is_permanent() {
+    fn budget_exceeded_query_scope_is_permanent() {
         let e: Error = BudgetExceededSnafu {
+            scope: BudgetScope::PerQuery,
             attempted_micro_cents: 1_000_000_u64,
             cap_micro_cents: 500_000_u64,
+            remaining_micro_cents: 500_000_u64,
+            resets_at: None,
         }
         .build();
         assert!(e.is_permanent());
         assert!(!e.is_transient());
+    }
+
+    #[test]
+    fn budget_exceeded_rolling_window_scope_is_transient() {
+        // WHY(zetesis#47): unlike a query/lifetime/paid-tier denial, a
+        // rolling-window denial genuinely clears at `resets_at`.
+        let e: Error = BudgetExceededSnafu {
+            scope: BudgetScope::PerConsumerDay,
+            attempted_micro_cents: 1_u64,
+            cap_micro_cents: 50_000_000_u64,
+            remaining_micro_cents: 0_u64,
+            resets_at: Some("2026-07-02T00:00:00Z".parse::<Timestamp>().unwrap()),
+        }
+        .build();
+        assert!(e.is_transient());
+        assert!(!e.is_permanent());
     }
 
     #[test]
@@ -497,8 +542,11 @@ mod tests {
             }
             .build(),
             BudgetExceededSnafu {
+                scope: BudgetScope::PerQuery,
                 attempted_micro_cents: 1_u64,
                 cap_micro_cents: 0_u64,
+                remaining_micro_cents: 0_u64,
+                resets_at: None,
             }
             .build(),
             FatalCorruptionSnafu {

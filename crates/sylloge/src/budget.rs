@@ -11,11 +11,23 @@
 //! reads an unpruned running total. [`crate::CostTracking`] remains the
 //! per-call cost report; the router folds each call's paid total into the
 //! ledger via [`SpendLedger::record_cost`].
+//!
+//! [`BudgetConstraint::permits`] and [`SpendLedger::record`] are
+//! deliberately separate, non-atomic operations -- a caller that checks
+//! then records against a ledger it does not hold exclusively (e.g. two
+//! concurrent calls sharing one `Arc<Mutex<SpendLedger>>` but each doing
+//! `lock(); permits(); unlock(); ...; lock(); record(); unlock();` instead
+//! of one held lock) can let both calls see room and both record, exceeding
+//! the cap. [`BudgetConstraint::try_reserve`] closes that gap for callers
+//! who hold `&mut SpendLedger` across the whole decision: it checks every
+//! configured scope and only then records, as one operation, so there is no
+//! window between "checked" and "recorded" for a caller using it correctly.
 
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::cost::CostTracking;
+use crate::error::{BudgetExceededSnafu, Result};
 
 /// Length of the rolling per-day budget window.
 pub const DAY_WINDOW: SignedDuration = SignedDuration::from_hours(24);
@@ -95,6 +107,22 @@ impl SpendLedger {
         self.paid_since_micro_cents(day_window_start(now))
     }
 
+    /// When the rolling 24-hour window as of `now` next has room -- the
+    /// instant the oldest event currently inside the window rolls out of
+    /// it. `None` when no event is currently inside the window (there is
+    /// nothing to wait on; the window already has room for anything up to
+    /// the configured cap).
+    #[must_use]
+    pub fn day_window_reset_at(&self, now: Timestamp) -> Option<Timestamp> {
+        let cutoff = day_window_start(now);
+        self.events
+            .iter()
+            .filter(|e| e.at > cutoff)
+            .map(|e| e.at)
+            .min()
+            .map(|earliest| earliest.checked_add(DAY_WINDOW).unwrap_or(Timestamp::MAX))
+    }
+
     /// Recorded spend events, in recording order.
     #[must_use]
     pub fn events(&self) -> &[SpendEvent] {
@@ -119,6 +147,29 @@ fn day_window_start(now: Timestamp) -> Timestamp {
     now.checked_sub(DAY_WINDOW).unwrap_or(Timestamp::MIN)
 }
 
+/// Which configured ceiling a [`crate::Error::BudgetExceeded`] denial
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetScope {
+    /// [`BudgetConstraint::per_query_cap_micro_cents`] -- single-call
+    /// ceiling.
+    PerQuery,
+    /// [`BudgetConstraint::per_day_cap_micro_cents`] -- rolling 24-hour
+    /// ceiling for the calling consumer/agent.
+    PerConsumerDay,
+    /// [`BudgetConstraint::per_fleet_day_cap_micro_cents`] -- rolling
+    /// 24-hour ceiling shared across every consumer/agent in the fleet.
+    PerFleetDay,
+    /// [`BudgetConstraint::per_agent_cap_micro_cents`] -- lifetime ceiling
+    /// for the calling consumer/agent.
+    PerAgentLifetime,
+    /// [`BudgetConstraint::allow_paid_tier`] is `false`; no paid spend is
+    /// permitted regardless of the numeric caps.
+    PaidTierDisabled,
+}
+
 /// Per-call budget ceiling.
 ///
 /// All caps are in USD micro-cents (see [`crate::ProviderSpend`] for the
@@ -127,14 +178,24 @@ fn day_window_start(now: Timestamp) -> Timestamp {
 /// is not the common intent. Callers who want a true zero-spend budget
 /// should set `allow_paid_tier = false` instead.
 ///
-/// The cap hierarchy:
+/// The cap hierarchy has four scopes: the three canonical Phase 0 scopes
+/// (query, consumer-day, fleet-day) plus a lifetime cap:
 /// - [`BudgetConstraint::per_query_cap_micro_cents`] — single-call ceiling.
 ///   Violations reject the call before it reaches any paid provider.
 /// - [`BudgetConstraint::per_day_cap_micro_cents`] — rolling-24-hour
-///   ceiling for the calling agent. Enforced against the timestamped
-///   events in the persisted [`SpendLedger`].
+///   ceiling for the calling consumer/agent. Enforced against the
+///   timestamped events in the persisted [`SpendLedger`].
+/// - [`BudgetConstraint::per_fleet_day_cap_micro_cents`] — rolling-24-hour
+///   ceiling shared across the whole fleet. Enforced against a second,
+///   fleet-scoped [`SpendLedger`] the caller supplies separately from the
+///   consumer/agent ledger (see [`BudgetConstraint::try_reserve`]).
 /// - [`BudgetConstraint::per_agent_cap_micro_cents`] — lifetime cap for
 ///   the calling agent (typically set per-deployment, not per-call).
+///
+/// Constructing a custom [`BudgetConstraint`] outside this crate: the
+/// type is `#[non_exhaustive]`, so use [`BudgetConstraint::free_only`] or
+/// [`BudgetConstraint::phase_zero_default`] as a base and the `with_*`
+/// builders to adjust individual ceilings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BudgetConstraint {
@@ -145,6 +206,12 @@ pub struct BudgetConstraint {
     /// Max paid spend the calling agent may incur in a rolling 24-hour
     /// window, in micro-cents. `0` = no per-day cap.
     pub per_day_cap_micro_cents: u64,
+
+    /// Max paid spend the whole fleet may incur in a rolling 24-hour
+    /// window, in micro-cents, across every consumer/agent. `0` = no
+    /// fleet-day cap. Enforced against a fleet-scoped [`SpendLedger`]
+    /// distinct from any individual agent's ledger.
+    pub per_fleet_day_cap_micro_cents: u64,
 
     /// Max lifetime paid spend the calling agent may incur, in
     /// micro-cents. `0` = no lifetime cap.
@@ -163,6 +230,7 @@ impl BudgetConstraint {
         Self {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 0,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: false,
         }
@@ -171,6 +239,9 @@ impl BudgetConstraint {
     /// Default-ish permissive budget: paid tier allowed with a $0.05 per-query
     /// cap, $5/day soft cap, $20 lifetime cap. Matches the Phase 0 initial
     /// proposal in `projects/zetesis/phases/00-spec/PLAN.md` (REQ-00-04).
+    /// No fleet-day cap by default -- set one explicitly via
+    /// [`BudgetConstraint::with_per_fleet_day_cap`] once a fleet-wide
+    /// ledger is wired up.
     #[must_use]
     pub const fn phase_zero_default() -> Self {
         Self {
@@ -178,10 +249,51 @@ impl BudgetConstraint {
             per_query_cap_micro_cents: 500_000,
             // $5.00 = 50_000_000 micro-cents
             per_day_cap_micro_cents: 50_000_000,
+            per_fleet_day_cap_micro_cents: 0,
             // $20.00 = 200_000_000 micro-cents
             per_agent_cap_micro_cents: 200_000_000,
             allow_paid_tier: true,
         }
+    }
+
+    /// Builder: set the per-query cap. See
+    /// [`BudgetConstraint::per_query_cap_micro_cents`].
+    #[must_use]
+    pub const fn with_per_query_cap(mut self, cap_micro_cents: u64) -> Self {
+        self.per_query_cap_micro_cents = cap_micro_cents;
+        self
+    }
+
+    /// Builder: set the per-consumer-day cap. See
+    /// [`BudgetConstraint::per_day_cap_micro_cents`].
+    #[must_use]
+    pub const fn with_per_day_cap(mut self, cap_micro_cents: u64) -> Self {
+        self.per_day_cap_micro_cents = cap_micro_cents;
+        self
+    }
+
+    /// Builder: set the per-fleet-day cap. See
+    /// [`BudgetConstraint::per_fleet_day_cap_micro_cents`].
+    #[must_use]
+    pub const fn with_per_fleet_day_cap(mut self, cap_micro_cents: u64) -> Self {
+        self.per_fleet_day_cap_micro_cents = cap_micro_cents;
+        self
+    }
+
+    /// Builder: set the per-agent lifetime cap. See
+    /// [`BudgetConstraint::per_agent_cap_micro_cents`].
+    #[must_use]
+    pub const fn with_per_agent_cap(mut self, cap_micro_cents: u64) -> Self {
+        self.per_agent_cap_micro_cents = cap_micro_cents;
+        self
+    }
+
+    /// Builder: set whether any paid tier may be attempted. See
+    /// [`BudgetConstraint::allow_paid_tier`].
+    #[must_use]
+    pub const fn with_paid_tier_allowed(mut self, allowed: bool) -> Self {
+        self.allow_paid_tier = allowed;
+        self
     }
 
     /// Whether this budget would permit a paid call of `spend_micro_cents`
@@ -191,7 +303,16 @@ impl BudgetConstraint {
     /// tracked separately for rate-limit enforcement. A cap of `0` is
     /// treated as "disabled". The per-day cap is evaluated against the
     /// rolling 24-hour window ending at `now`; the per-agent cap against
-    /// the ledger's lifetime total.
+    /// the ledger's lifetime total. Does not check
+    /// [`BudgetConstraint::per_fleet_day_cap_micro_cents`] -- that scope
+    /// needs a second, fleet-wide ledger; use
+    /// [`BudgetConstraint::try_reserve`] to check every configured scope
+    /// including fleet.
+    ///
+    /// NOT atomic with any later [`SpendLedger::record`] against the same
+    /// ledger -- see the module docs. Prefer
+    /// [`BudgetConstraint::try_reserve`] wherever the caller can hold
+    /// `&mut SpendLedger` across the decision.
     #[must_use]
     pub fn permits(&self, spend_micro_cents: u64, ledger: &SpendLedger, now: Timestamp) -> bool {
         if !self.allow_paid_tier && spend_micro_cents > 0 {
@@ -218,6 +339,110 @@ impl BudgetConstraint {
             return false;
         }
         true
+    }
+
+    /// Atomically check every configured scope -- query, consumer-day,
+    /// fleet-day, agent-lifetime -- against `spend_micro_cents` and, only
+    /// if every scope permits it, record the spend into both
+    /// `consumer_ledger` and `fleet_ledger` as a single operation.
+    ///
+    /// Scopes are checked in the order listed above; the first violated
+    /// scope is returned and NEITHER ledger is mutated on denial -- a
+    /// caller retrying after a denial starts from the same ledger state,
+    /// not a partially-charged one.
+    ///
+    /// WHY(zetesis#47): [`BudgetConstraint::permits`] followed by a
+    /// separate [`SpendLedger::record`] leaves a window in which two
+    /// concurrent calls both see room and both record, exceeding the cap
+    /// (demonstrated by the
+    /// `try_reserve_concurrent_75_plus_75_never_exceeds_100_cap`
+    /// integration test). This method closes that window for a caller
+    /// that holds `&mut SpendLedger` for both ledgers across the whole
+    /// call -- typically behind one lock acquisition covering both.
+    ///
+    /// This is a single-phase reservation: the recorded amount is
+    /// `spend_micro_cents` itself, treated as final. It does not implement
+    /// a two-phase reserve-then-reconcile-to-actual-cost protocol -- a
+    /// recorded spend has no identity a later call could target to adjust
+    /// it -- and it does not persist across a process restart: both
+    /// ledgers are caller-owned, in-memory value types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::BudgetExceeded`] naming the first violated
+    /// [`BudgetScope`], with the remaining allowance and (for
+    /// rolling-window scopes) the reset time at which the scope will next
+    /// have room.
+    pub fn try_reserve(
+        &self,
+        spend_micro_cents: u64,
+        consumer_ledger: &mut SpendLedger,
+        fleet_ledger: &mut SpendLedger,
+        now: Timestamp,
+    ) -> Result<()> {
+        if !self.allow_paid_tier && spend_micro_cents > 0 {
+            return Err(BudgetExceededSnafu {
+                scope: BudgetScope::PaidTierDisabled,
+                attempted_micro_cents: spend_micro_cents,
+                cap_micro_cents: 0_u64,
+                remaining_micro_cents: 0_u64,
+                resets_at: None,
+            }
+            .build());
+        }
+        if self.per_query_cap_micro_cents > 0 && spend_micro_cents > self.per_query_cap_micro_cents
+        {
+            return Err(BudgetExceededSnafu {
+                scope: BudgetScope::PerQuery,
+                attempted_micro_cents: spend_micro_cents,
+                cap_micro_cents: self.per_query_cap_micro_cents,
+                remaining_micro_cents: self.per_query_cap_micro_cents,
+                resets_at: None,
+            }
+            .build());
+        }
+        if self.per_day_cap_micro_cents > 0 {
+            let used = consumer_ledger.paid_in_day_window_micro_cents(now);
+            if used.saturating_add(spend_micro_cents) > self.per_day_cap_micro_cents {
+                return Err(BudgetExceededSnafu {
+                    scope: BudgetScope::PerConsumerDay,
+                    attempted_micro_cents: spend_micro_cents,
+                    cap_micro_cents: self.per_day_cap_micro_cents,
+                    remaining_micro_cents: self.per_day_cap_micro_cents.saturating_sub(used),
+                    resets_at: consumer_ledger.day_window_reset_at(now),
+                }
+                .build());
+            }
+        }
+        if self.per_fleet_day_cap_micro_cents > 0 {
+            let used = fleet_ledger.paid_in_day_window_micro_cents(now);
+            if used.saturating_add(spend_micro_cents) > self.per_fleet_day_cap_micro_cents {
+                return Err(BudgetExceededSnafu {
+                    scope: BudgetScope::PerFleetDay,
+                    attempted_micro_cents: spend_micro_cents,
+                    cap_micro_cents: self.per_fleet_day_cap_micro_cents,
+                    remaining_micro_cents: self.per_fleet_day_cap_micro_cents.saturating_sub(used),
+                    resets_at: fleet_ledger.day_window_reset_at(now),
+                }
+                .build());
+            }
+        }
+        if self.per_agent_cap_micro_cents > 0 {
+            let used = consumer_ledger.lifetime_paid_micro_cents();
+            if used.saturating_add(spend_micro_cents) > self.per_agent_cap_micro_cents {
+                return Err(BudgetExceededSnafu {
+                    scope: BudgetScope::PerAgentLifetime,
+                    attempted_micro_cents: spend_micro_cents,
+                    cap_micro_cents: self.per_agent_cap_micro_cents,
+                    remaining_micro_cents: self.per_agent_cap_micro_cents.saturating_sub(used),
+                    resets_at: None,
+                }
+                .build());
+            }
+        }
+        consumer_ledger.record(now, spend_micro_cents);
+        fleet_ledger.record(now, spend_micro_cents);
+        Ok(())
     }
 }
 
@@ -288,6 +513,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 50_000_000,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 200_000_000,
             allow_paid_tier: true,
         };
@@ -307,6 +533,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 50_000_000,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: true,
         };
@@ -326,6 +553,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 50_000_000,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 200_000_000,
             allow_paid_tier: true,
         };
@@ -381,6 +609,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 0,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 1_000,
             allow_paid_tier: true,
         };
@@ -396,6 +625,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 0,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: true,
         };
@@ -409,6 +639,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 1_000_000,
             per_day_cap_micro_cents: 0,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: false,
         };
@@ -440,6 +671,7 @@ mod tests {
         let b = BudgetConstraint {
             per_query_cap_micro_cents: 0,
             per_day_cap_micro_cents: 0,
+            per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 1_000,
             allow_paid_tier: true,
         };
