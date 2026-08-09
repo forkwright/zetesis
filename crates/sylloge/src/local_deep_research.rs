@@ -103,17 +103,40 @@ impl LocalDeepResearch {
         Ok(())
     }
 
-    /// Mark a submitted task as cancelled.
+    /// Cancel a submitted task. Idempotent for pending, running, and
+    /// already-cancelled tasks. Rejects a task that already reached
+    /// [`ResearchStatus::Ready`] or [`ResearchStatus::Failed`] instead of
+    /// silently discarding its result — see [`DeepResearch::cancel`] for
+    /// the full per-state contract this implements.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::TaskUnavailable`] if the task is unknown.
+    /// Returns [`crate::Error::TaskUnavailable`] if the task is unknown,
+    /// or if it already reached [`ResearchStatus::Ready`] or
+    /// [`ResearchStatus::Failed`].
     pub fn cancel_task(&self, task: &TaskId) -> Result<()> {
         let mut tasks = self.lock_tasks()?;
         let record = task_record_mut(&mut tasks, task)?;
-        record.status = ResearchStatus::Cancelled;
-        record.result = None;
-        Ok(())
+        match record.status {
+            ResearchStatus::Pending | ResearchStatus::Running { .. } => {
+                record.status = ResearchStatus::Cancelled;
+                record.result = None;
+                Ok(())
+            }
+            ResearchStatus::Cancelled => Ok(()),
+            ResearchStatus::Ready { .. } => Err(TaskUnavailableSnafu {
+                task: task.to_string(),
+                reason: "task already completed; a finished result cannot be retroactively \
+                         cancelled"
+                    .to_owned(),
+            }
+            .build()),
+            ResearchStatus::Failed { .. } => Err(TaskUnavailableSnafu {
+                task: task.to_string(),
+                reason: "task already failed; there is nothing left to cancel".to_owned(),
+            }
+            .build()),
+        }
     }
 
     /// Number of tasks currently held by this in-memory backend.
@@ -303,6 +326,10 @@ impl DeepResearch for LocalDeepResearch {
                 .build()),
             }
         })
+    }
+
+    fn cancel<'a>(&'a self, task: &'a TaskId) -> BoxFut<'a, Result<()>> {
+        Box::pin(async move { self.cancel_task(task) })
     }
 }
 

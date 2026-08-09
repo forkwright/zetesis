@@ -3,14 +3,15 @@
 //! Deep-research backends (GPT Researcher, `open_deep_research`, You.com
 //! `DeepResearch`, Valyu) do not fit the single-round-trip [`super::Provider`]
 //! shape — they run for minutes to hours. This trait models them as a
-//! three-step lifecycle:
+//! task lifecycle:
 //!
 //! 1. [`DeepResearch::submit`] — hand the orchestrator a query, get back a
 //!    [`super::TaskId`].
 //! 2. [`DeepResearch::poll`] — caller polls for status until
 //!    [`super::ResearchStatus::is_ready`] returns `true`.
 //! 3. [`DeepResearch::fetch`] — retrieve the final
-//!    [`crate::ResearchResult`].
+//!    [`crate::ResearchResult`], or [`DeepResearch::cancel`] to stop the
+//!    task instead.
 
 use crate::ResearchResult;
 use crate::constraints::{DeepDepth, ResearchStatus, TaskId};
@@ -33,12 +34,21 @@ use crate::provider::BoxFut;
 /// - `fetch` on a failed, cancelled, or unknown task must fail with the
 ///   permanent-classified [`crate::Error::TaskUnavailable`] so callers
 ///   stop retrying and resubmit instead.
+/// - `cancel` must be idempotent for a pending, running, or already-cancelled
+///   task (repeated calls succeed and leave the task cancelled) and must
+///   fail with [`crate::Error::TaskUnavailable`] for a task that already
+///   reached [`ResearchStatus::Ready`] or [`ResearchStatus::Failed`] — a
+///   finished task cannot be retroactively cancelled, and silently
+///   discarding its result on a mistaken cancel call would be data loss.
 ///
-/// # Cancellation
+/// # Future-drop safety
 ///
-/// `submit` and `poll` are cancel-safe. `fetch` is cancel-safe as long as
-/// the backend does not delete the task on retrieval (most don't; a few
-/// do — implementations that do must document this in their own rustdoc).
+/// (Distinct from [`DeepResearch::cancel`], which cancels a submitted
+/// *task* — this section is about dropping the `Future` a method call
+/// returns.) `submit` and `poll` are safe to drop mid-`.await`. `fetch` is
+/// safe to drop as long as the backend does not delete the task on
+/// retrieval (most don't; a few do — implementations that do must
+/// document this in their own rustdoc).
 pub trait DeepResearch: Send + Sync {
     /// Stable deep-research backend identifier.
     fn name(&self) -> &'static str;
@@ -71,4 +81,14 @@ pub trait DeepResearch: Send + Sync {
     /// [`crate::Error::TaskUnavailable`] (permanent) for failed,
     /// cancelled, or unknown tasks.
     fn fetch<'a>(&'a self, task: &'a TaskId) -> BoxFut<'a, Result<ResearchResult>>;
+
+    /// Cancel a previously-submitted task. See the trait-level `# Contract`
+    /// section for the exact per-state behavior.
+    ///
+    /// # Errors
+    ///
+    /// The returned future resolves to [`crate::Error::TaskUnavailable`]
+    /// (permanent) if the task is unknown or already reached a terminal
+    /// state other than cancelled.
+    fn cancel<'a>(&'a self, task: &'a TaskId) -> BoxFut<'a, Result<()>>;
 }
