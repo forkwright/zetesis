@@ -43,6 +43,7 @@ mod crawler;
 mod deep;
 mod error;
 mod fixture;
+mod freshness;
 mod local_deep_research;
 mod provider;
 mod query;
@@ -63,6 +64,10 @@ pub use error::{
     TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
 };
 pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
+pub use freshness::{
+    FreshnessBasis, FreshnessDecision, FreshnessPolicy, PublicationPrecision,
+    PublicationProvenance, PublicationTime, PublicationTimeCapability, evaluate_freshness,
+};
 pub use local_deep_research::LocalDeepResearch;
 pub use provider::{BoxFut, Provider};
 pub use query::QueryShape;
