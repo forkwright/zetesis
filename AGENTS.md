@@ -41,7 +41,7 @@ Every PR commit must carry a truthful `Gate-Passed:` trailer. Run locally first:
 ~/.cargo/bin/cargo test --workspace --all-targets
 ```
 
-Then commit with: `Gate-Passed: kanon-ci/local 1.85`
+Then commit with: `Gate-Passed: kanon-ci/local 1.97.1`
 
 ## Forbidden
 
