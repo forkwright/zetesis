@@ -166,7 +166,10 @@ impl SearchConstraints {
             );
         }
 
-        Ok(ValidatedTarget { addrs })
+        Ok(ValidatedTarget {
+            url: url.clone(),
+            addrs,
+        })
     }
 }
 
@@ -207,18 +210,33 @@ impl Resolver for SystemResolver {
     }
 }
 
-/// The concrete address(es) a URL resolved to, after passing the full
-/// network-target policy in [`SearchConstraints::check_url`] /
-/// [`SearchConstraints::check_url_with`].
+/// Proof that a URL passed the full network-target policy in
+/// [`SearchConstraints::check_url`] / [`SearchConstraints::check_url_with`],
+/// carrying the resolution that proof was based on.
 ///
-/// A compliant [`super::Crawler`] implementation connects to one of
-/// these addresses directly rather than letting its HTTP client
-/// re-resolve the hostname -- reusing the validated resolution instead of
-/// re-resolving is what closes the check-time/connect-time gap a DNS
-/// answer can otherwise change across (rebinding).
+/// This is the enforced capability, not an optional convention:
+/// `#[non_exhaustive]` plus the absence of any public constructor other
+/// than `check_url`/`check_url_with` means no other crate can build one
+/// from scratch (a `ValidatedTarget { .. }` struct literal outside this
+/// crate does not compile, even though every field is `pub`).
+/// [`super::Crawler`] requires one as its entry parameter (see
+/// [`super::Crawler::fetch_page`]), so calling it with a URL that was
+/// never checked does not compile -- see that trait's `# Enforcement`
+/// doctest.
+///
+/// A compliant [`super::Crawler`] implementation fetches `url` but
+/// connects to one of [`ValidatedTarget::addrs`] directly rather than
+/// letting its HTTP client re-resolve the hostname -- reusing the
+/// validated resolution instead of re-resolving is what closes the
+/// check-time/connect-time gap a DNS answer can otherwise change across
+/// (rebinding).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ValidatedTarget {
+    /// The exact URL this target was validated for. A compliant fetch
+    /// issues its request against this URL (path, query, `Host`
+    /// header/TLS SNI) while connecting the socket to `addrs`.
+    pub url: Url,
     /// Concrete resolved address(es) that passed the policy. Non-empty.
     pub addrs: Vec<IpAddr>,
 }
@@ -279,15 +297,20 @@ fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
 }
 
 /// Whether `addr` falls in a blocked range (loopback, private,
-/// link-local, unspecified, multicast, or reserved). An IPv4-mapped IPv6
-/// address (`::ffff:a.b.c.d`) is unwrapped and classified as its embedded
-/// IPv4 address, so `::ffff:127.0.0.1` is blocked the same as
-/// `127.0.0.1` -- see zetesis#48's mapped-address fixture.
+/// link-local, unspecified, multicast, or reserved). Both RFC 4291 IPv6
+/// forms that embed an IPv4 address in the low 32 bits -- the IPv4-mapped
+/// form (`::ffff:a.b.c.d`, high 80 bits zero then 16 bits of `0xffff`)
+/// AND the deprecated IPv4-compatible form (`::a.b.c.d`, high 96 bits
+/// all zero) -- are unwrapped and classified as their embedded IPv4
+/// address, so `::ffff:127.0.0.1` and `::127.0.0.1` are both blocked the
+/// same as `127.0.0.1` -- see zetesis#48's mapped-address fixture.
+/// [`Ipv6Addr::to_ipv4`] (not the narrower `to_ipv4_mapped`, which
+/// recognizes only the mapped form) unwraps both.
 fn is_blocked_address(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => is_blocked_ipv4(v4),
         IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
+            .to_ipv4()
             .map_or_else(|| is_blocked_ipv6(v6), is_blocked_ipv4),
     }
 }
@@ -653,6 +676,43 @@ mod tests {
     }
 
     #[test]
+    fn check_url_rejects_ipv4_compatible_ipv6_loopback() {
+        // WHY: the deprecated RFC 4291 "IPv4-compatible" embedding
+        // (`::a.b.c.d`, all-zero high 96 bits, distinct from the
+        // IPv4-mapped `::ffff:a.b.c.d` form) is valid `Host::Ipv6` literal
+        // syntax and must be unwrapped and classified the same as its
+        // mapped counterpart -- `to_ipv4_mapped` alone does not see it.
+        let c = SearchConstraints::default();
+        let err = c
+            .check_url(&Url::parse("http://[::127.0.0.1]/admin").unwrap())
+            .unwrap_err();
+        assert!(err.is_permanent());
+    }
+
+    #[test]
+    fn check_url_rejects_ipv4_compatible_ipv6_metadata() {
+        // WHY: the same embedding for the cloud metadata IP the mapped-form
+        // fixture above already covers -- proves this isn't loopback-only.
+        let c = SearchConstraints::default();
+        assert!(
+            c.check_url(&Url::parse("http://[::169.254.169.254]/latest/meta-data/").unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn check_url_permits_ipv4_compatible_ipv6_public() {
+        // WHY: contrast case -- the compatible form is unwrapped and
+        // classified, not blanket-rejected as a form, mirroring
+        // check_url_permits_ipv4_mapped_ipv6_public.
+        let c = SearchConstraints::default();
+        assert!(
+            c.check_url(&Url::parse("http://[::8.8.8.8]/").unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn check_url_dns_rebinding_rejects_when_resolved_address_is_blocked() {
         // WHY: the fixture zetesis#48 requires -- a hostname whose text
         // names no local address at all resolves, at check time, to a
@@ -722,9 +782,9 @@ mod tests {
         // (see the trait contract in crawler.rs) rather than
         // re-resolving; this proves the check actually exposes them.
         let c = SearchConstraints::default();
-        let target = c
-            .check_url(&Url::parse("http://8.8.8.8/").unwrap())
-            .unwrap();
+        let url = Url::parse("http://8.8.8.8/").unwrap();
+        let target = c.check_url(&url).unwrap();
         assert_eq!(target.addrs, vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+        assert_eq!(target.url, url);
     }
 }
