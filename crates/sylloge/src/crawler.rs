@@ -20,11 +20,23 @@ use crate::provider::BoxFut;
 /// # Contract
 ///
 /// - `fetch_page` receives URLs that originate from untrusted provider
-///   responses. Implementations MUST enforce the caller's domain rules:
-///   reject the request URL with [`crate::Error::DomainDenied`] when
-///   [`SearchConstraints::permits_url`] returns `false`, and apply the
-///   same check to every redirect target (including the final URL) so a
-///   permitted URL cannot bounce into a denied domain.
+///   responses. Implementations MUST call
+///   [`SearchConstraints::check_url`] on the request URL AND on every
+///   redirect target (including the final URL) BEFORE following it --
+///   this is not optional per-implementation convention, it is the
+///   fail-closed network-target policy (scheme allowlist, no userinfo,
+///   no loopback/private/link-local/unspecified/multicast/reserved
+///   resolved address; see zetesis#48) that a permitted request URL does
+///   NOT extend to a redirect target on its own.
+/// - Implementations MUST propagate a failing check's `Err` (typically
+///   [`crate::Error::UnsafeTarget`], occasionally
+///   [`crate::Error::TransientIo`] if resolution itself fails) rather
+///   than following the URL anyway.
+/// - Implementations MUST connect to one of the returned
+///   [`crate::ValidatedTarget::addrs`] directly rather than letting the
+///   underlying HTTP client re-resolve the hostname. Re-resolving after
+///   the check passed reopens the exact gap the check closed: the DNS
+///   answer can differ between check-time and connect-time (rebinding).
 /// - `fetch_page` must return [`PageContent`] with at minimum the
 ///   `final_url`, `content_type`, and `body` filled in. Implementations
 ///   that can extract plain text should do so and fill `extracted_text`.
@@ -37,15 +49,15 @@ pub trait Crawler: Send + Sync {
     /// Stable crawler identifier.
     fn name(&self) -> &'static str;
 
-    /// Fetch and normalize a single page, subject to the caller's domain
-    /// constraints.
+    /// Fetch and normalize a single page, subject to the caller's
+    /// network-target policy (see the trait-level contract above).
     ///
     /// # Errors
     ///
-    /// The returned future resolves to [`crate::Error::DomainDenied`] if
-    /// `url` (or any redirect target) fails
-    /// [`SearchConstraints::permits_url`], and to another [`crate::Error`]
-    /// if the page cannot be fetched or parsed.
+    /// The returned future resolves to [`crate::Error::UnsafeTarget`] or
+    /// [`crate::Error::TransientIo`] if `url` (or any redirect target)
+    /// fails [`SearchConstraints::check_url`], and to another
+    /// [`crate::Error`] if the page cannot be fetched or parsed.
     fn fetch_page<'a>(
         &'a self,
         url: &'a Url,

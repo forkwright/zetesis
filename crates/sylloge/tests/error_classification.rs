@@ -12,7 +12,8 @@ use sylloge::{
     BudgetExceededSnafu, BudgetScope, DomainDeniedSnafu, Error, FatalCorruptionSnafu,
     InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu,
     ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
+    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
+    UnsupportedSnafu,
 };
 
 fn all_variants() -> Vec<Error> {
@@ -92,6 +93,11 @@ fn all_variants() -> Vec<Error> {
         .build(),
         DomainDeniedSnafu {
             url: "https://denied.example/".to_owned(),
+        }
+        .build(),
+        UnsafeTargetSnafu {
+            url: "http://127.0.0.1/".to_owned(),
+            reason: "m".to_owned(),
         }
         .build(),
     ]
@@ -194,6 +200,7 @@ fn permanent_set_is_expected_members() {
             Error::TaskUnavailable { .. } => "TaskUnavailable",
             Error::Unauthorized { .. } => "Unauthorized",
             Error::Unsupported { .. } => "Unsupported",
+            Error::UnsafeTarget { .. } => "UnsafeTarget",
             _ => unreachable!("is_permanent returned true for unexpected variant"),
         })
         .collect();
@@ -209,6 +216,7 @@ fn permanent_set_is_expected_members() {
             "PermanentIo",
             "TaskUnavailable",
             "Unauthorized",
+            "UnsafeTarget",
             "Unsupported"
         ]
     );

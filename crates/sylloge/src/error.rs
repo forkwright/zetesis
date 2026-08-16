@@ -250,11 +250,36 @@ pub enum Error {
 
     /// The URL's host is rejected by the caller's domain allow/deny
     /// constraints. Permanent: retrying the same URL cannot succeed under
-    /// the same [`super::SearchConstraints`].
+    /// the same [`super::SearchConstraints`]. `sylloge`'s own
+    /// [`super::SearchConstraints::check_url`] reports a domain
+    /// allow/deny mismatch as [`Error::UnsafeTarget`] instead (it is one
+    /// rejection reason among several the same call checks); this variant
+    /// stays available for a [`super::Crawler`] implementation with its
+    /// own domain policy layered on top.
     #[snafu(display("domain denied by constraints: {url}"))]
     DomainDenied {
         /// The rejected URL.
         url: String,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// The URL failed [`super::SearchConstraints::check_url`]'s
+    /// fail-closed network-target policy: a disallowed scheme, userinfo,
+    /// a missing host, a resolved address in a blocked range (loopback,
+    /// private, link-local, unspecified, multicast, or reserved), or a
+    /// domain allow/deny mismatch. Permanent: retrying the same URL
+    /// cannot succeed under the same [`super::SearchConstraints`] (the
+    /// only way to admit a blocked address is
+    /// [`super::SearchConstraints::allow_local_targets`], a constraints
+    /// change, not a retry).
+    #[snafu(display("network-target policy rejected {url}: {reason}"))]
+    UnsafeTarget {
+        /// The rejected URL.
+        url: String,
+        /// Which check failed and why.
+        reason: String,
         /// Source location captured at the point the error was built.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -333,7 +358,8 @@ impl Error {
             | Self::TaskUnavailable { .. }
             | Self::MissingCitations { .. }
             | Self::OversizedPayload { .. }
-            | Self::DomainDenied { .. } => ErrorClass::Permanent,
+            | Self::DomainDenied { .. }
+            | Self::UnsafeTarget { .. } => ErrorClass::Permanent,
             Self::FatalCorruption { .. } => ErrorClass::Fatal,
         }
     }
@@ -531,6 +557,19 @@ mod tests {
         .build();
         assert!(e.is_permanent());
         assert!(format!("{e}").contains("tracker.example"));
+    }
+
+    #[test]
+    fn unsafe_target_is_permanent() {
+        let e: Error = UnsafeTargetSnafu {
+            url: "http://169.254.169.254/latest/meta-data/".to_owned(),
+            reason: "resolved address 169.254.169.254 is in a blocked range".to_owned(),
+        }
+        .build();
+        assert!(e.is_permanent());
+        let s = format!("{e}");
+        assert!(s.contains("169.254.169.254"));
+        assert!(s.contains("blocked range"));
     }
 
     #[test]
