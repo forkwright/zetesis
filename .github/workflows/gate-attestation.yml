@@ -16,7 +16,7 @@
 # harmonia's and epistole's are (those mirror a currently-passing ci.yml).
 #
 # rust_toolchain input intentionally omitted (stays default ""): zetesis
-# carries its own rust-toolchain.toml (channel "1.85"), auto-detected by
+# carries its own rust-toolchain.toml, auto-detected by
 # actions-rust-lang/setup-rust-toolchain inside the reusable workflow.
 name: Gate Attestation
 
