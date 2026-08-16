@@ -48,7 +48,7 @@ impl SearchConstraints {
     /// Full fail-closed network-target check, resolving the host through
     /// `resolver` rather than the OS default (see [`SystemResolver`]).
     /// Injecting a resolver lets a caller pin the connect-time lookup, use
-    /// a caching/DoH resolver, or (in tests) supply a canned result
+    /// a caching/`DoH` resolver, or (in tests) supply a canned result
     /// without touching the network.
     ///
     /// Enforces, in order:
@@ -173,7 +173,7 @@ impl SearchConstraints {
 /// Resolves a host to its concrete address(es), for
 /// [`SearchConstraints::check_url_with`]. [`SearchConstraints::check_url`]
 /// uses [`SystemResolver`]; a caller can inject any other implementation
-/// -- a caching or DoH resolver, or (in tests) a canned result that
+/// -- a caching or `DoH` resolver, or (in tests) a canned result that
 /// exercises resolution-dependent policy (e.g. DNS rebinding) without
 /// touching the network.
 pub trait Resolver {
