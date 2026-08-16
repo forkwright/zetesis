@@ -75,24 +75,19 @@ impl Default for PublicationTime {
 /// Whether a citation with [`PublicationTime::Unknown`] is rejected or
 /// allowed to fall back to [`crate::Citation::accessed_at`] when a
 /// [`crate::SearchConstraints::freshness_window`] is configured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum FreshnessPolicy {
     /// A citation with [`PublicationTime::Unknown`] is rejected outright
     /// -- retrieval time never substitutes for an unproven content-freshness
     /// claim. The safe default.
+    #[default]
     Strict,
     /// A citation with [`PublicationTime::Unknown`] falls back to
     /// [`crate::Citation::accessed_at`]. Explicit opt-in: this can accept
     /// stale content that merely happens to have been retrieved recently.
     Permissive,
-}
-
-impl Default for FreshnessPolicy {
-    fn default() -> Self {
-        Self::Strict
-    }
 }
 
 /// Which timestamp actually drove a [`FreshnessDecision`].
