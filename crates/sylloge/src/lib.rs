@@ -45,6 +45,7 @@ mod error;
 mod fixture;
 mod freshness;
 mod local_deep_research;
+mod net_policy;
 mod provider;
 mod query;
 mod result;
@@ -61,7 +62,8 @@ pub use error::{
     BudgetExceededSnafu, DomainDeniedSnafu, Error, ErrorClass, FatalCorruptionSnafu,
     InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu,
     ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsupportedSnafu,
+    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
+    UnsupportedSnafu,
 };
 pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
 pub use freshness::{
@@ -69,6 +71,7 @@ pub use freshness::{
     PublicationProvenance, PublicationTime, PublicationTimeCapability, evaluate_freshness,
 };
 pub use local_deep_research::LocalDeepResearch;
+pub use net_policy::{Resolver, SystemResolver, ValidatedTarget};
 pub use provider::{BoxFut, Provider};
 pub use query::QueryShape;
 pub use result::{ProvenanceEntry, ResearchResult, ResultHit};

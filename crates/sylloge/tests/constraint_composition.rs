@@ -9,6 +9,7 @@
 
 #![expect(clippy::unwrap_used, reason = "test assertions must fail loudly")]
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -16,17 +17,46 @@ use url::Url;
 
 use sylloge::{
     BudgetConstraint, Citation, FreshnessBasis, FreshnessPolicy, PublicationPrecision,
-    PublicationProvenance, PublicationTime, SearchConstraints, SourceKind, SpendLedger,
+    PublicationProvenance, PublicationTime, Resolver, SearchConstraints, SourceKind, SpendLedger,
 };
 
 fn now() -> Timestamp {
     "2026-07-01T00:00:00Z".parse().unwrap()
 }
 
+/// Test [`Resolver`] that returns a fixed known-public address (Google
+/// Public DNS) regardless of the hostname asked for. These tests exercise
+/// domain-suffix and budget/freshness composition, not address
+/// classification or live DNS, so every lookup here resolves the same way
+/// deterministically.
+struct PublicResolver;
+
+impl Resolver for PublicResolver {
+    fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<IpAddr>> {
+        Ok(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))])
+    }
+}
+
 #[test]
-fn default_constraints_permit_arbitrary_url() {
+fn default_constraints_permit_legitimate_public_target() {
     let c = SearchConstraints::default();
-    assert!(c.permits_url(&Url::parse("https://anywhere.example/x").unwrap()));
+    assert!(
+        c.check_url(&Url::parse("http://8.8.8.8/x").unwrap())
+            .is_ok()
+    );
+}
+
+#[test]
+fn default_constraints_reject_local_target() {
+    // WHY(zetesis#48): "no domain filters configured" must never mean
+    // "any network target is reachable" -- the network-target policy is
+    // unconditional, not one more opt-in filter alongside the domain
+    // allow/denylist.
+    let c = SearchConstraints::default();
+    assert!(
+        c.check_url(&Url::parse("http://127.0.0.1/x").unwrap())
+            .is_err()
+    );
 }
 
 #[test]
@@ -40,10 +70,23 @@ fn compose_all_builders() {
     assert_eq!(c.max_results, 20);
     assert_eq!(c.freshness_window, Some(Duration::from_secs(86_400)));
     assert_eq!(c.language.as_ref().unwrap().as_str(), "en-US");
-    assert!(c.permits_url(&Url::parse("https://mit.edu/x").unwrap()));
-    assert!(c.permits_url(&Url::parse("https://nasa.gov/x").unwrap()));
-    assert!(!c.permits_url(&Url::parse("https://example.com/x").unwrap()));
-    assert!(!c.permits_url(&Url::parse("https://spam.example/x").unwrap()));
+    let r = PublicResolver;
+    assert!(
+        c.check_url_with(&Url::parse("https://mit.edu/x").unwrap(), &r)
+            .is_ok()
+    );
+    assert!(
+        c.check_url_with(&Url::parse("https://nasa.gov/x").unwrap(), &r)
+            .is_ok()
+    );
+    assert!(
+        c.check_url_with(&Url::parse("https://example.com/x").unwrap(), &r)
+            .is_err()
+    );
+    assert!(
+        c.check_url_with(&Url::parse("https://spam.example/x").unwrap(), &r)
+            .is_err()
+    );
 }
 
 #[test]
@@ -93,14 +136,24 @@ fn serialize_and_deserialize_composed_constraints_round_trip() {
 #[test]
 fn empty_allowlist_rejects_everything() {
     let c = SearchConstraints::new(10, BudgetConstraint::default()).with_allowlist(Vec::new());
-    assert!(!c.permits_url(&Url::parse("https://mit.edu/x").unwrap()));
-    assert!(!c.permits_url(&Url::parse("https://example.com/x").unwrap()));
+    let r = PublicResolver;
+    assert!(
+        c.check_url_with(&Url::parse("https://mit.edu/x").unwrap(), &r)
+            .is_err()
+    );
+    assert!(
+        c.check_url_with(&Url::parse("https://example.com/x").unwrap(), &r)
+            .is_err()
+    );
 }
 
 #[test]
 fn empty_denylist_permits_everything() {
     let c = SearchConstraints::new(10, BudgetConstraint::default()).with_denylist(Vec::new());
-    assert!(c.permits_url(&Url::parse("https://mit.edu/x").unwrap()));
+    assert!(
+        c.check_url_with(&Url::parse("https://mit.edu/x").unwrap(), &PublicResolver)
+            .is_ok()
+    );
 }
 
 #[test]

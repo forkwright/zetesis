@@ -15,9 +15,9 @@ use jiff::Timestamp;
 use url::Url;
 
 use sylloge::{
-    BoxFut, BudgetConstraint, Citation, CostTracking, Crawler, DeepDepth, DeepResearch,
-    DomainDeniedSnafu, Error, PageContent, Provider, ProviderSpend, ProviderTier, QueryShape,
-    ResearchResult, ResearchStatus, Result, ResultHit, SearchConstraints, SourceKind, TaskId,
+    BoxFut, BudgetConstraint, Citation, CostTracking, Crawler, DeepDepth, DeepResearch, Error,
+    PageContent, Provider, ProviderSpend, ProviderTier, QueryShape, ResearchResult, ResearchStatus,
+    Result, ResultHit, SearchConstraints, SourceKind, TaskId, ValidatedTarget,
 };
 
 struct StubProvider;
@@ -104,7 +104,14 @@ impl DeepResearch for StubDeep {
     }
 }
 
-struct StubCrawler;
+/// Minimal `Crawler` implementing the trait's redirect contract: the
+/// request URL arrives pre-validated (`target: &ValidatedTarget`, which
+/// the caller can only have obtained via `check_url`), and -- if
+/// `redirect_to` is set, simulating the `Location` header a fetch
+/// returned -- checks the redirect target too before "following" it.
+struct StubCrawler {
+    redirect_to: Option<Url>,
+}
 
 impl Crawler for StubCrawler {
     fn name(&self) -> &'static str {
@@ -113,20 +120,24 @@ impl Crawler for StubCrawler {
 
     fn fetch_page<'a>(
         &'a self,
-        url: &'a Url,
+        target: &'a ValidatedTarget,
         constraints: &'a SearchConstraints,
     ) -> BoxFut<'a, Result<PageContent>> {
         Box::pin(async move {
-            // The trait contract: implementations enforce the caller's
-            // domain rules before fetching.
-            if !constraints.permits_url(url) {
-                return Err(DomainDeniedSnafu {
-                    url: url.to_string(),
+            // The trait contract: the request URL's policy check is
+            // already proven by `target`'s existence (see the Crawler
+            // `# Enforcement` doc); every redirect target still needs its
+            // own check before following it -- a permitted request URL
+            // does not extend to wherever it redirects.
+            let final_url = match &self.redirect_to {
+                Some(redirect) => {
+                    constraints.check_url(redirect)?;
+                    redirect.clone()
                 }
-                .build());
-            }
+                None => target.url.clone(),
+            };
             PageContent::new(
-                url.clone(),
+                final_url,
                 "text/html",
                 b"<html></html>".to_vec(),
                 "2026-04-22T00:00:00Z".parse().unwrap(),
@@ -161,32 +172,55 @@ async fn deep_research_is_dyn_compatible() {
 
 #[tokio::test]
 async fn crawler_is_dyn_compatible() {
-    let c: Arc<dyn Crawler> = Arc::new(StubCrawler);
+    // WHY: an IP-literal target needs no DNS resolution, keeping this
+    // trait-object-shape test independent of live network access.
+    let c: Arc<dyn Crawler> = Arc::new(StubCrawler { redirect_to: None });
     let constraints = SearchConstraints::default();
-    let page = c
-        .fetch_page(&Url::parse("https://example.org/").unwrap(), &constraints)
-        .await
+    let target = constraints
+        .check_url(&Url::parse("http://8.8.8.8/").unwrap())
         .unwrap();
+    let page = c.fetch_page(&target, &constraints).await.unwrap();
     assert!(page.is_html());
     assert_eq!(c.name(), "stub-crawler");
 }
 
 #[tokio::test]
 async fn crawler_rejects_denied_domain() {
-    // WHY: fetch_page receives untrusted provider URLs; the constraints
-    // parameter is the domain-filter contract and a denied host must be
-    // rejected with the permanent DomainDenied error before any fetch.
-    let c: Arc<dyn Crawler> = Arc::new(StubCrawler);
-    let constraints = SearchConstraints::default().with_denylist(vec!["evil.example".to_owned()]);
-    let err = c
-        .fetch_page(
-            &Url::parse("https://evil.example/payload").unwrap(),
-            &constraints,
-        )
-        .await
+    // WHY: fetch_page receives untrusted provider URLs, but the request
+    // URL's check now happens at the `ValidatedTarget` boundary rather
+    // than inside fetch_page (see the Crawler `# Enforcement` doc) -- a
+    // denied host must be rejected by `check_url` itself, before a
+    // `ValidatedTarget` (and therefore a `fetch_page` call) can exist at
+    // all. The denylist entry matches on the host string, which works the
+    // same for an IP literal as a domain name -- using one here keeps the
+    // test independent of live DNS.
+    let constraints = SearchConstraints::default().with_denylist(vec!["8.8.8.8".to_owned()]);
+    let err = constraints
+        .check_url(&Url::parse("http://8.8.8.8/payload").unwrap())
         .unwrap_err();
     assert!(err.is_permanent());
-    assert!(err.to_string().contains("evil.example"));
+    assert!(err.to_string().contains("8.8.8.8"));
+}
+
+#[tokio::test]
+async fn crawler_rejects_redirect_to_unsafe_target() {
+    // WHY: the redirect fixture zetesis#48 requires -- the initial URL
+    // alone passing the network-target policy is insufficient. A
+    // provider-controlled response that redirects a permitted URL to the
+    // cloud metadata endpoint must still fail, proving the Crawler
+    // contract's "check every redirect target" requirement is exercised,
+    // not just documented (this half of the contract cannot be made a
+    // compile-time guarantee -- see the Crawler `# Enforcement` doc).
+    let c: Arc<dyn Crawler> = Arc::new(StubCrawler {
+        redirect_to: Some(Url::parse("http://169.254.169.254/latest/meta-data/").unwrap()),
+    });
+    let constraints = SearchConstraints::default();
+    let target = constraints
+        .check_url(&Url::parse("http://8.8.8.8/").unwrap())
+        .unwrap();
+    let err = c.fetch_page(&target, &constraints).await.unwrap_err();
+    assert!(err.is_permanent());
+    assert!(err.to_string().contains("169.254.169.254"));
 }
 
 #[tokio::test]

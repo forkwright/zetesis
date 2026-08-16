@@ -3,7 +3,9 @@
 //! [`SearchConstraints`] is passed into every [`super::Provider::search`]
 //! call. It captures caller intent that isn't already in the query string
 //! itself: budget ceiling, freshness window, allowed languages, domain
-//! allow/deny lists.
+//! allow/deny lists, and -- via [`SearchConstraints::check_url`] -- the
+//! fail-closed network-target policy every [`super::Crawler`]
+//! implementation must apply before fetching or following a redirect.
 //!
 //! [`DeepDepth`], [`ResearchStatus`], and [`TaskId`] are value types used
 //! by the [`super::DeepResearch`] trait for its asynchronous task
@@ -68,6 +70,19 @@ pub struct SearchConstraints {
     /// Budget ceiling for this call. See [`BudgetConstraint`] for the
     /// cap hierarchy.
     pub budget: BudgetConstraint,
+
+    /// Explicit opt-in to permit loopback, private, link-local,
+    /// unspecified, multicast, and reserved network targets that
+    /// [`SearchConstraints::check_url`] otherwise rejects unconditionally.
+    /// `false` unless set via
+    /// [`SearchConstraints::with_local_targets_allowed`] -- this is the
+    /// ONLY way to reach such a target; `domain_allowlist` cannot
+    /// re-enable it, because the network-target policy is evaluated
+    /// before the domain allow/deny check and does not consult it.
+    /// Intended for a deliberately configured internal-crawl deployment
+    /// or an integration test hitting a local mock server. Never derive
+    /// this from caller- or provider-controlled input.
+    pub allow_local_targets: bool,
 }
 
 impl SearchConstraints {
@@ -83,6 +98,7 @@ impl SearchConstraints {
             domain_allowlist: None,
             domain_denylist: None,
             budget,
+            allow_local_targets: false,
         }
     }
 
@@ -122,31 +138,6 @@ impl SearchConstraints {
         self
     }
 
-    /// Whether the given URL's host matches the domain allow / deny rules.
-    ///
-    /// Semantics: denylist is checked first (any match = reject). Then
-    /// allowlist: if present, the host must match at least one entry. If
-    /// allowlist is absent, any non-denied host is accepted. Comparison is
-    /// ASCII case-insensitive on both the host and the configured entries.
-    ///
-    /// A URL without a host (e.g. `file:/`) is rejected when the
-    /// allowlist is set, and accepted otherwise.
-    #[must_use]
-    pub fn permits_url(&self, url: &Url) -> bool {
-        let Some(host) = url.host_str() else {
-            return self.domain_allowlist.is_none();
-        };
-        if let Some(deny) = &self.domain_denylist {
-            if deny.iter().any(|suffix| matches_suffix(host, suffix)) {
-                return false;
-            }
-        }
-        if let Some(allow) = &self.domain_allowlist {
-            return allow.iter().any(|suffix| matches_suffix(host, suffix));
-        }
-        true
-    }
-
     /// Evaluate `citation` against `freshness_window` and
     /// `freshness_policy` as of `now`. `freshness_window: None` always
     /// accepts. This is the single enforcement point for the freshness
@@ -173,13 +164,20 @@ impl SearchConstraints {
 
 impl Default for SearchConstraints {
     /// Sensible permissive default: 10 results, free-only budget, no
-    /// filters.
+    /// domain filters. Permissive stops at the domain layer --
+    /// [`SearchConstraints::allow_local_targets`] still defaults `false`,
+    /// so [`SearchConstraints::check_url`] still fails closed on
+    /// loopback/private/link-local/unspecified/multicast/reserved
+    /// targets even with every other field left at its default.
     fn default() -> Self {
         Self::new(10, BudgetConstraint::default())
     }
 }
 
-fn matches_suffix(host: &str, suffix: &str) -> bool {
+/// Domain-suffix matcher backing [`SearchConstraints::domain_allowlist`] /
+/// [`SearchConstraints::domain_denylist`], and (from `crate::net_policy`)
+/// [`SearchConstraints::check_url_with`]'s domain-policy step.
+pub(crate) fn matches_suffix(host: &str, suffix: &str) -> bool {
     // WHY: domain names are case-insensitive (RFC 4343) and a trailing
     // root dot is semantically empty, so both sides are normalized before
     // comparison — otherwise a caller-supplied ".EDU" or "Tracker.Example"
@@ -478,23 +476,6 @@ mod tests {
     }
 
     #[test]
-    fn permits_url_exact_match() {
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_allowlist(vec!["example.org".to_owned()]);
-        assert!(c.permits_url(&Url::parse("https://example.org/x").unwrap()));
-        assert!(!c.permits_url(&Url::parse("https://example.com/x").unwrap()));
-    }
-
-    #[test]
-    fn permits_url_suffix_match() {
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_allowlist(vec![".edu".to_owned()]);
-        assert!(c.permits_url(&Url::parse("https://mit.edu/").unwrap()));
-        assert!(c.permits_url(&Url::parse("https://cs.mit.edu/").unwrap()));
-        assert!(!c.permits_url(&Url::parse("https://mit.com/").unwrap()));
-    }
-
-    #[test]
     fn matches_suffix_is_case_insensitive() {
         // WHY: domain names are case-insensitive (RFC 4343); the url
         // crate always produces lowercase hosts, so a mixed-case entry
@@ -506,32 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn permits_url_mixed_case_denylist_blocks() {
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_denylist(vec!["Tracker.Example".to_owned()]);
-        assert!(!c.permits_url(&Url::parse("https://tracker.example/pixel").unwrap()));
-        assert!(!c.permits_url(&Url::parse("https://sub.tracker.example/x").unwrap()));
-        assert!(c.permits_url(&Url::parse("https://other.example/x").unwrap()));
-    }
-
-    #[test]
-    fn permits_url_mixed_case_allowlist_matches() {
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_allowlist(vec![".EDU".to_owned()]);
-        assert!(c.permits_url(&Url::parse("https://mit.edu/").unwrap()));
-        assert!(!c.permits_url(&Url::parse("https://mit.com/").unwrap()));
-    }
-
-    #[test]
     fn matches_suffix_tolerates_trailing_root_dot() {
         // Fully-qualified hosts with a trailing root dot are the same
-        // domain; entries written FQDN-style must match too.
+        // domain; entries written FQDN-style must match too. See
+        // `net_policy::tests::check_url_accepts_trailing_root_dot_domain`
+        // for the `check_url_with` integration of this.
         assert!(matches_suffix("mit.edu.", ".edu"));
         assert!(matches_suffix("mit.edu", "edu."));
         assert!(matches_suffix("mit.edu.", "mit.edu."));
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_allowlist(vec![".edu".to_owned()]);
-        assert!(c.permits_url(&Url::parse("https://mit.edu./").unwrap()));
     }
 
     #[test]
@@ -541,32 +504,6 @@ mod tests {
         assert!(!matches_suffix("mit.edu", "."));
         assert!(!matches_suffix("mit.edu", ""));
         assert!(!matches_suffix("mit.edu", ".."));
-    }
-
-    #[test]
-    fn permits_url_denylist_rejects() {
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_denylist(vec!["evil.example".to_owned()]);
-        assert!(!c.permits_url(&Url::parse("https://evil.example/x").unwrap()));
-        assert!(c.permits_url(&Url::parse("https://good.example/x").unwrap()));
-    }
-
-    #[test]
-    fn permits_url_deny_takes_precedence() {
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_allowlist(vec!["example.org".to_owned()])
-            .with_denylist(vec!["bad.example.org".to_owned()]);
-        assert!(c.permits_url(&Url::parse("https://example.org/").unwrap()));
-        assert!(!c.permits_url(&Url::parse("https://bad.example.org/").unwrap()));
-    }
-
-    #[test]
-    fn permits_url_suffix_prefix_boundary() {
-        // "mit.edu" must not match "badmit.edu" (no dot boundary).
-        let c = SearchConstraints::new(10, BudgetConstraint::default())
-            .with_allowlist(vec!["mit.edu".to_owned()]);
-        assert!(!c.permits_url(&Url::parse("https://badmit.edu/").unwrap()));
-        assert!(c.permits_url(&Url::parse("https://cs.mit.edu/").unwrap()));
     }
 
     #[test]
@@ -768,28 +705,5 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: PageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
-    }
-
-    #[test]
-    fn permits_url_no_host_without_allowlist() {
-        let c = SearchConstraints::default();
-        // `data:` URLs have no host; with no allowlist they're permitted.
-        let url = Url::parse("data:text/plain,hi").unwrap();
-        assert!(c.permits_url(&url));
-    }
-
-    #[test]
-    fn permits_url_no_host_with_allowlist_rejected() {
-        let c = SearchConstraints::default().with_allowlist(vec!["example.org".to_owned()]);
-        let url = Url::parse("data:text/plain,hi").unwrap();
-        assert!(!c.permits_url(&url));
-    }
-
-    #[test]
-    fn dot_prefix_and_bare_suffix_equivalent() {
-        let c_dot = SearchConstraints::default().with_allowlist(vec![".edu".to_owned()]);
-        let c_bare = SearchConstraints::default().with_allowlist(vec!["edu".to_owned()]);
-        let url = Url::parse("https://cs.mit.edu/").unwrap();
-        assert_eq!(c_dot.permits_url(&url), c_bare.permits_url(&url));
     }
 }
