@@ -16,7 +16,11 @@ use sylloge::{
     UnsupportedSnafu,
 };
 
-fn all_variants() -> Vec<Error> {
+// WHY: kept as two functions, split along the transient/(permanent+fatal)
+// line `transient_set_is_expected_members` already tests -- one
+// `all_variants` covering every listed variant tripped
+// clippy::too_many_lines (this repo's threshold is 80, `clippy.toml`).
+fn transient_variants() -> Vec<Error> {
     vec![
         ProviderFailureSnafu {
             provider: "p".to_owned(),
@@ -41,22 +45,32 @@ fn all_variants() -> Vec<Error> {
             window: None::<String>,
         }
         .build(),
-        UnauthorizedSnafu {
-            provider: "p".to_owned(),
-            message: "m".to_owned(),
-        }
-        .build(),
         TimeoutSnafu {
             provider: "p".to_owned(),
             timeout_ms: 1_u64,
         }
         .build(),
-        InvalidQuerySnafu {
-            reason: "m".to_owned(),
-        }
-        .build(),
         TransientIoSnafu {
             message: "m".to_owned(),
+        }
+        .build(),
+        TaskNotReadySnafu {
+            task: "t".to_owned(),
+            detail: "m".to_owned(),
+        }
+        .build(),
+    ]
+}
+
+fn permanent_and_fatal_variants() -> Vec<Error> {
+    vec![
+        UnauthorizedSnafu {
+            provider: "p".to_owned(),
+            message: "m".to_owned(),
+        }
+        .build(),
+        InvalidQuerySnafu {
+            reason: "m".to_owned(),
         }
         .build(),
         PermanentIoSnafu {
@@ -69,11 +83,6 @@ fn all_variants() -> Vec<Error> {
         .build(),
         UnsupportedSnafu {
             reason: "m".to_owned(),
-        }
-        .build(),
-        TaskNotReadySnafu {
-            task: "t".to_owned(),
-            detail: "m".to_owned(),
         }
         .build(),
         TaskUnavailableSnafu {
@@ -101,6 +110,12 @@ fn all_variants() -> Vec<Error> {
         }
         .build(),
     ]
+}
+
+fn all_variants() -> Vec<Error> {
+    let mut variants = transient_variants();
+    variants.extend(permanent_and_fatal_variants());
+    variants
 }
 
 #[test]
