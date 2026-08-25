@@ -26,9 +26,16 @@ jobs:
       security-events: write
     # WHY: thin caller of the fleet-canonical reusable (cargo-deny + prebuilt
     # cargo-audit + osv-scanner) instead of a fourth copy-pasted inline block —
-    # one fact, one place. Pin includes the prebuilt-cargo-audit fix (#8) that
-    # unbroke MSRV-pinned repos like this one (kanon#2385).
-    uses: forkwright/.github/.github/workflows/security.yml@764a84135ce378865ade02894a93db3a48042950
+    # one fact, one place.
+    #
+    # WHY @main, not the SHA that shipped the prebuilt-cargo-audit fix (#8,
+    # kanon#2385): forkwright/.github publishes no tags, so that SHA had no
+    # dependabot bump path and just froze here -- 7 weeks behind main by the
+    # time this was floated, the oldest pin found across the fleet. main
+    # carries #8 and everything after it. forkwright/.github is first-party --
+    # same org, same trust boundary -- not the third-party supply-chain case a
+    # SHA pin defends against.
+    uses: forkwright/.github/.github/workflows/security.yml@main
     with:
       has_private_deps: false
       run_osv: true

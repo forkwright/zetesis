@@ -23,6 +23,10 @@ jobs:
   release-please:
     # WHY: Creates release PRs and tags when conventional commits land on main.
     # Operator merges release PRs; never auto-merge them.
+    #
+    # WHY @main, not a pinned SHA: forkwright/.github publishes no tags, so a
+    # SHA pin here would have no dependabot bump path and would just freeze.
+    # First-party, same-org reusable; fleet convention pins it @main.
     uses: forkwright/.github/.github/workflows/release-please.yml@main
     secrets:
       RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
