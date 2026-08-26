@@ -20,5 +20,5 @@ Structured LLM corpus:
 
 - [README.md](README.md): purpose and public boundaries
 - [CLAUDE.md](CLAUDE.md): repo conventions and design principles
-- [Cargo.toml](Cargo.toml): currently empty workspace
+- [Cargo.toml](Cargo.toml): manifest for the locked four-crate workspace (`zetesis`, `sylloge`, `elenkhos`, `synopsis`); `sylloge` carries the landed provider/result/budget implementation, `elenkhos`/`synopsis` are reserved crate boundaries
 - `kanon/projects/zetesis/STATE.md`: canonical planning status
