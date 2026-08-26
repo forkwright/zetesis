@@ -1,8 +1,9 @@
 //! Fail-closed network-target policy for every URL a [`super::Crawler`]
 //! implementation fetches or follows a redirect to (zetesis#48).
 //!
-//! [`SearchConstraints::check_url`] / [`SearchConstraints::check_url_with`]
-//! are the enforced entry point: scheme allowlist, no userinfo, and --
+//! [`SearchConstraints::check_url`], [`SearchConstraints::check_url_with`],
+//! and [`SearchConstraints::check_url_with_local_authorization`] are the
+//! enforced entry points: scheme allowlist, no userinfo, and --
 //! critically -- classification of the RESOLVED address (via [`Resolver`],
 //! defaulting to [`SystemResolver`]) rather than the URL's text, which is
 //! what stops a hostname that resolves to a loopback/private/link-local
@@ -253,13 +254,14 @@ impl Resolver for SystemResolver {
 }
 
 /// Proof that a URL passed the full network-target policy in
-/// [`SearchConstraints::check_url`] / [`SearchConstraints::check_url_with`],
-/// carrying the resolution that proof was based on.
+/// [`SearchConstraints::check_url`], [`SearchConstraints::check_url_with`],
+/// or [`SearchConstraints::check_url_with_local_authorization`], carrying the
+/// resolution that proof was based on.
 ///
 /// This is the enforced capability, not an optional convention:
-/// private fields plus the absence of any public constructor other than
-/// `check_url`/`check_url_with` mean no other crate can build one from
-/// scratch or retarget it after validation.
+/// private fields plus the absence of any public constructor other than those
+/// three policy checks mean no other crate can build one from scratch or
+/// retarget it after validation.
 /// [`super::Crawler`] requires one as its entry parameter (see
 /// [`super::Crawler::fetch_page`]), so calling it with a URL that was
 /// never checked does not compile -- see that trait's `# Enforcement`
