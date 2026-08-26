@@ -20,8 +20,8 @@ use crate::provider::BoxFut;
 ///
 /// - `fetch_page` receives URLs that originate from untrusted provider
 ///   responses, so it takes a [`ValidatedTarget`] rather than a raw
-///   [`url::Url`] -- see `# Enforcement` below. The target's `url` is
-///   what a compliant implementation fetches.
+///   [`url::Url`] -- see `# Enforcement` below. [`ValidatedTarget::url`]
+///   returns the URL that a compliant implementation fetches.
 /// - Implementations MUST call [`SearchConstraints::check_url`] on every
 ///   redirect target (including the final URL) BEFORE following it --
 ///   this is not optional per-implementation convention, it is the
@@ -54,12 +54,13 @@ use crate::provider::BoxFut;
 /// # Enforcement
 ///
 /// The request URL's policy check is not an optional per-implementation
-/// convention: [`ValidatedTarget`] is `#[non_exhaustive]` with no public
-/// constructor other than [`SearchConstraints::check_url`] /
-/// [`SearchConstraints::check_url_with`], so a caller cannot obtain one
-/// -- and therefore cannot call `fetch_page` at all -- without first
-/// passing the check. A bare, unchecked [`url::Url`] does not compile
-/// where a `&ValidatedTarget` is required:
+/// convention: [`ValidatedTarget`] has private fields and no public
+/// constructor other than [`SearchConstraints::check_url`],
+/// [`SearchConstraints::check_url_with`], or
+/// [`SearchConstraints::check_url_with_local_authorization`], so a caller
+/// cannot obtain one -- and therefore cannot call `fetch_page` at all --
+/// without first passing the check. A bare, unchecked [`url::Url`] does not
+/// compile where a `&ValidatedTarget` is required:
 ///
 /// ```compile_fail
 /// # use url::Url;
@@ -83,8 +84,10 @@ pub trait Crawler: Send + Sync {
     /// network-target policy (see the trait-level contract above).
     ///
     /// `target` is a pre-validated URL and its resolved addresses -- the
-    /// caller obtains it via [`SearchConstraints::check_url`] /
-    /// [`SearchConstraints::check_url_with`] before calling `fetch_page`.
+    /// caller obtains it via [`SearchConstraints::check_url`],
+    /// [`SearchConstraints::check_url_with`], or
+    /// [`SearchConstraints::check_url_with_local_authorization`] before
+    /// calling `fetch_page`.
     ///
     /// # Errors
     ///

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use language_tags::LanguageTag;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::ensure;
 use url::Url;
 
@@ -32,6 +32,7 @@ use crate::freshness::{self, FreshnessBasis, FreshnessDecision, FreshnessPolicy}
 /// scope applies).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct SearchConstraints {
     /// Maximum number of hits the provider may return. Providers that
     /// can't honour this exactly must return at most this many.
@@ -70,19 +71,6 @@ pub struct SearchConstraints {
     /// Budget ceiling for this call. See [`BudgetConstraint`] for the
     /// cap hierarchy.
     pub budget: BudgetConstraint,
-
-    /// Explicit opt-in to permit loopback, private, link-local,
-    /// unspecified, multicast, and reserved network targets that
-    /// [`SearchConstraints::check_url`] otherwise rejects unconditionally.
-    /// `false` unless set via
-    /// [`SearchConstraints::with_local_targets_allowed`] -- this is the
-    /// ONLY way to reach such a target; `domain_allowlist` cannot
-    /// re-enable it, because the network-target policy is evaluated
-    /// before the domain allow/deny check and does not consult it.
-    /// Intended for a deliberately configured internal-crawl deployment
-    /// or an integration test hitting a local mock server. Never derive
-    /// this from caller- or provider-controlled input.
-    pub allow_local_targets: bool,
 }
 
 impl SearchConstraints {
@@ -98,7 +86,6 @@ impl SearchConstraints {
             domain_allowlist: None,
             domain_denylist: None,
             budget,
-            allow_local_targets: false,
         }
     }
 
@@ -164,11 +151,10 @@ impl SearchConstraints {
 
 impl Default for SearchConstraints {
     /// Sensible permissive default: 10 results, free-only budget, no
-    /// domain filters. Permissive stops at the domain layer --
-    /// [`SearchConstraints::allow_local_targets`] still defaults `false`,
-    /// so [`SearchConstraints::check_url`] still fails closed on
-    /// loopback/private/link-local/unspecified/multicast/reserved
-    /// targets even with every other field left at its default.
+    /// domain filters. Permissive stops at the domain layer, so
+    /// [`SearchConstraints::check_url`] still fails closed on
+    /// loopback/private/link-local/unspecified/multicast/reserved targets
+    /// even with every other field left at its default.
     fn default() -> Self {
         Self::new(10, BudgetConstraint::default())
     }
@@ -350,36 +336,67 @@ impl ResearchStatus {
 }
 
 /// Output of a single [`super::Crawler::fetch_page`] call.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Fields are private so callers cannot mutate a checked value past its
+/// size bounds. Construction, extracted-text attachment, and deserialization
+/// all pass through the same validation path. Deserialization rejects an
+/// oversized value before returning `PageContent`; it is not a streaming
+/// decoder and therefore does not bound temporary allocations made by the
+/// selected `serde` format.
+///
+/// ```compile_fail
+/// # use sylloge::PageContent;
+/// fn replace_body(page: &mut PageContent) {
+///     page.body.clear();
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct PageContent {
     /// The URL that was actually fetched. May differ from the caller's
     /// URL after redirect chains.
-    pub final_url: Url,
+    final_url: Url,
 
     /// MIME content type of the returned payload (e.g. `text/html`,
     /// `application/pdf`).
-    pub content_type: String,
+    content_type: String,
 
     /// Raw body bytes. Capped at [`PageContent::MAX_BODY_BYTES`] by
     /// [`PageContent::new`].
-    pub body: Vec<u8>,
+    body: Vec<u8>,
 
     /// Extracted plain-text rendering of the body, if the crawler could
     /// produce one. HTML extractors typically fill this; PDF pipelines
     /// leave it `None` unless configured for OCR. Capped at
     /// [`PageContent::MAX_TEXT_BYTES`] by
     /// [`PageContent::with_extracted_text`].
-    pub extracted_text: Option<String>,
+    extracted_text: Option<String>,
 
     /// Timestamp the fetch completed.
-    pub fetched_at: Timestamp,
+    fetched_at: Timestamp,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageContentWire {
+    final_url: Url,
+    content_type: String,
+    body: Vec<u8>,
+    extracted_text: Option<String>,
+    fetched_at: Timestamp,
 }
 
 impl PageContent {
+    /// Maximum accepted serialized URL size in bytes.
+    pub const MAX_URL_BYTES: usize = 8 * 1024;
+
+    /// Maximum accepted MIME content-type size in bytes.
+    pub const MAX_CONTENT_TYPE_BYTES: usize = 1024;
+
     /// Maximum accepted `body` size in bytes. Crawled pages come from
-    /// untrusted origins; anything beyond this cap is rejected at
-    /// construction rather than buffered.
+    /// untrusted origins; anything beyond this cap is rejected before a
+    /// `PageContent` value is returned. The constructor receives an allocated
+    /// buffer and is not a streaming reader.
     pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
     /// Maximum accepted `extracted_text` size in bytes.
@@ -390,14 +407,31 @@ impl PageContent {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::OversizedPayload`] when `body` exceeds
-    /// [`PageContent::MAX_BODY_BYTES`].
+    /// Returns [`crate::Error::OversizedPayload`] when the URL, content type,
+    /// or body exceeds its corresponding `PageContent` limit.
     pub fn new(
         final_url: Url,
         content_type: impl Into<String>,
         body: Vec<u8>,
         fetched_at: Timestamp,
     ) -> Result<Self> {
+        let content_type = content_type.into();
+        ensure!(
+            final_url.as_str().len() <= Self::MAX_URL_BYTES,
+            OversizedPayloadSnafu {
+                what: "page URL",
+                len: final_url.as_str().len(),
+                max: Self::MAX_URL_BYTES,
+            }
+        );
+        ensure!(
+            content_type.len() <= Self::MAX_CONTENT_TYPE_BYTES,
+            OversizedPayloadSnafu {
+                what: "content type",
+                len: content_type.len(),
+                max: Self::MAX_CONTENT_TYPE_BYTES,
+            }
+        );
         ensure!(
             body.len() <= Self::MAX_BODY_BYTES,
             OversizedPayloadSnafu {
@@ -408,7 +442,7 @@ impl PageContent {
         );
         Ok(Self {
             final_url,
-            content_type: content_type.into(),
+            content_type,
             body,
             extracted_text: None,
             fetched_at,
@@ -441,10 +475,67 @@ impl PageContent {
         self.content_type.starts_with("text/html")
     }
 
+    /// The URL that was fetched.
+    #[must_use]
+    pub const fn final_url(&self) -> &Url {
+        &self.final_url
+    }
+
+    /// The response MIME content type.
+    #[must_use]
+    pub fn content_type(&self) -> &str {
+        &self.content_type
+    }
+
+    /// The bounded raw response body.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The bounded extracted text, when an extractor produced one.
+    #[must_use]
+    pub fn extracted_text(&self) -> Option<&str> {
+        self.extracted_text.as_deref()
+    }
+
+    /// The timestamp at which the fetch completed.
+    #[must_use]
+    pub const fn fetched_at(&self) -> &Timestamp {
+        &self.fetched_at
+    }
+
     /// Body size in bytes.
     #[must_use]
     pub fn body_len(&self) -> usize {
         self.body.len()
+    }
+}
+
+impl TryFrom<PageContentWire> for PageContent {
+    type Error = crate::Error;
+
+    fn try_from(wire: PageContentWire) -> Result<Self> {
+        let page = Self::new(
+            wire.final_url,
+            wire.content_type,
+            wire.body,
+            wire.fetched_at,
+        )?;
+        match wire.extracted_text {
+            Some(text) => page.with_extracted_text(text),
+            None => Ok(page),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PageContent {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PageContentWire::deserialize(deserializer)?;
+        Self::try_from(wire).map_err(serde::de::Error::custom)
     }
 }
 
@@ -627,28 +718,34 @@ mod tests {
 
     #[test]
     fn page_content_is_html() {
-        let p = PageContent {
-            final_url: Url::parse("https://example.org/").unwrap(),
-            content_type: "text/html; charset=utf-8".to_owned(),
-            body: b"<html></html>".to_vec(),
-            extracted_text: Some(String::new()),
-            fetched_at: "2026-04-22T00:00:00Z".parse().unwrap(),
-        };
+        let p = PageContent::new(
+            Url::parse("https://example.org/").unwrap(),
+            "text/html; charset=utf-8",
+            b"<html></html>".to_vec(),
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap()
+        .with_extracted_text("")
+        .unwrap();
         assert!(p.is_html());
         assert_eq!(p.body_len(), 13);
+        assert_eq!(p.body(), b"<html></html>");
+        assert_eq!(p.extracted_text(), Some(""));
     }
 
     #[test]
     fn page_content_non_html() {
-        let p = PageContent {
-            final_url: Url::parse("https://example.org/a.pdf").unwrap(),
-            content_type: "application/pdf".to_owned(),
-            body: vec![0_u8; 100],
-            extracted_text: None,
-            fetched_at: "2026-04-22T00:00:00Z".parse().unwrap(),
-        };
+        let p = PageContent::new(
+            Url::parse("https://example.org/a.pdf").unwrap(),
+            "application/pdf",
+            vec![0_u8; 100],
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
         assert!(!p.is_html());
         assert_eq!(p.body_len(), 100);
+        assert_eq!(p.content_type(), "application/pdf");
+        assert_eq!(p.extracted_text(), None);
     }
 
     #[test]
@@ -664,6 +761,32 @@ mod tests {
         .unwrap_err();
         assert!(err.is_permanent());
         assert!(err.to_string().contains("page body"));
+    }
+
+    #[test]
+    fn page_content_new_rejects_oversized_metadata() {
+        let oversized_url = Url::parse(&format!(
+            "https://example.org/{}",
+            "x".repeat(PageContent::MAX_URL_BYTES)
+        ))
+        .unwrap();
+        let err = PageContent::new(
+            oversized_url,
+            "text/html",
+            Vec::new(),
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("page URL"));
+
+        let err = PageContent::new(
+            Url::parse("https://example.org/").unwrap(),
+            "x".repeat(PageContent::MAX_CONTENT_TYPE_BYTES + 1),
+            Vec::new(),
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("content type"));
     }
 
     #[test]
@@ -694,16 +817,62 @@ mod tests {
     }
 
     #[test]
+    fn search_constraints_rejects_removed_local_target_flag() {
+        let mut value = serde_json::to_value(SearchConstraints::default()).unwrap();
+        value["allow_local_targets"] = serde_json::Value::Bool(true);
+        let err = serde_json::from_value::<SearchConstraints>(value).unwrap_err();
+        assert!(err.to_string().contains("allow_local_targets"));
+    }
+
+    #[test]
     fn page_content_serde_round_trip() {
-        let p = PageContent {
-            final_url: Url::parse("https://example.org/").unwrap(),
-            content_type: "text/html".to_owned(),
-            body: b"hello".to_vec(),
-            extracted_text: Some("hello".to_owned()),
-            fetched_at: "2026-04-22T00:00:00Z".parse().unwrap(),
-        };
+        let p = PageContent::new(
+            Url::parse("https://example.org/").unwrap(),
+            "text/html",
+            b"hello".to_vec(),
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap()
+        .with_extracted_text("hello")
+        .unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let back: PageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn page_content_deserialization_rejects_oversized_fields() {
+        let valid = PageContent::new(
+            Url::parse("https://example.org/").unwrap(),
+            "text/html",
+            b"hello".to_vec(),
+            "2026-04-22T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+
+        let mut content_type = serde_json::to_value(&valid).unwrap();
+        content_type["content_type"] =
+            serde_json::Value::String("x".repeat(PageContent::MAX_CONTENT_TYPE_BYTES + 1));
+        let err = serde_json::from_value::<PageContent>(content_type).unwrap_err();
+        assert!(err.to_string().contains("content type"));
+
+        let mut url = serde_json::to_value(&valid).unwrap();
+        url["final_url"] = serde_json::Value::String(format!(
+            "https://example.org/{}",
+            "x".repeat(PageContent::MAX_URL_BYTES)
+        ));
+        let err = serde_json::from_value::<PageContent>(url).unwrap_err();
+        assert!(err.to_string().contains("page URL"));
+
+        let mut body = serde_json::to_value(&valid).unwrap();
+        body["body"] = serde_json::to_value(vec![0_u8; PageContent::MAX_BODY_BYTES + 1]).unwrap();
+        let err = serde_json::from_value::<PageContent>(body).unwrap_err();
+        assert!(err.to_string().contains("page body"));
+
+        let mut text = serde_json::to_value(&valid).unwrap();
+        text["extracted_text"] =
+            serde_json::Value::String("x".repeat(PageContent::MAX_TEXT_BYTES + 1));
+        let err = serde_json::from_value::<PageContent>(text).unwrap_err();
+        assert!(err.to_string().contains("extracted text"));
     }
 }

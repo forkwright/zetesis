@@ -1,8 +1,9 @@
 //! Fail-closed network-target policy for every URL a [`super::Crawler`]
 //! implementation fetches or follows a redirect to (zetesis#48).
 //!
-//! [`SearchConstraints::check_url`] / [`SearchConstraints::check_url_with`]
-//! are the enforced entry point: scheme allowlist, no userinfo, and --
+//! [`SearchConstraints::check_url`], [`SearchConstraints::check_url_with`],
+//! and [`SearchConstraints::check_url_with_local_authorization`] are the
+//! enforced entry points: scheme allowlist, no userinfo, and --
 //! critically -- classification of the RESOLVED address (via [`Resolver`],
 //! defaulting to [`SystemResolver`]) rather than the URL's text, which is
 //! what stops a hostname that resolves to a loopback/private/link-local
@@ -20,15 +21,26 @@ use crate::error::{Result, TransientIoSnafu, UnsafeTargetSnafu};
 /// (`file`, `data`, `ftp`, ...) is rejected outright -- see zetesis#48.
 const ALLOWED_SCHEMES: [&str; 2] = ["http", "https"];
 
-impl SearchConstraints {
-    /// Builder: opt into permitting local/private network targets (see
-    /// [`SearchConstraints::allow_local_targets`]).
-    #[must_use]
-    pub fn with_local_targets_allowed(mut self) -> Self {
-        self.allow_local_targets = true;
-        self
-    }
+/// Opaque authority required to permit a local or otherwise blocked network
+/// target.
+///
+/// The capability has no public constructor, is not cloneable, and is not
+/// serializable or deserializable. Untrusted query/configuration data therefore
+/// cannot manufacture or persist it. No public minting path exists; process
+/// wiring must define a real authority boundary before local acquisition can be
+/// enabled.
+///
+/// ```compile_fail
+/// use sylloge::LocalTargetAuthorization;
+/// let _authorization = LocalTargetAuthorization { _private: () };
+/// ```
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct LocalTargetAuthorization {
+    _private: (),
+}
 
+impl SearchConstraints {
     /// Full fail-closed network-target check using the OS resolver
     /// ([`SystemResolver`]). See [`SearchConstraints::check_url_with`]
     /// for the resolver-injectable form and the full policy description.
@@ -55,14 +67,12 @@ impl SearchConstraints {
     /// 1. the scheme is in [`ALLOWED_SCHEMES`] (`http`, `https`);
     /// 2. the URL carries no userinfo;
     /// 3. a host is present (see the WARNING below);
-    /// 4. `resolver` resolves the host to concrete address(es), and --
-    ///    unless [`SearchConstraints::allow_local_targets`] is set -- none
-    ///    of them is loopback, private, link-local, unspecified,
-    ///    multicast, or reserved. This is checked on the RESOLVED
-    ///    address, never the URL text: a hostname that resolves to
-    ///    `127.0.0.1` fails here even though its text names no local
-    ///    address, which is what a purely textual check misses (DNS
-    ///    rebinding);
+    /// 4. `resolver` resolves the host to concrete address(es), none of which
+    ///    may be loopback, private, link-local, unspecified, multicast, or
+    ///    reserved. This is checked on the RESOLVED address, never the URL
+    ///    text: a hostname that resolves to `127.0.0.1` fails here even though
+    ///    its text names no local address, which is what a purely textual check
+    ///    misses (DNS rebinding);
     /// 5. the caller's domain allow/denylist, evaluated last so a
     ///    caller-configured allowlist can never re-admit a
     ///    network-unsafe target.
@@ -90,6 +100,39 @@ impl SearchConstraints {
     /// resolution, domain deny/allow mismatch), and
     /// [`crate::Error::TransientIo`] if `resolver` itself fails.
     pub fn check_url_with(&self, url: &Url, resolver: &dyn Resolver) -> Result<ValidatedTarget> {
+        self.check_url_with_policy(url, resolver, None)
+    }
+
+    /// Check a URL while carrying explicit process authority for local or
+    /// otherwise blocked address ranges.
+    ///
+    /// This is distinct from [`SearchConstraints`] because constraints are
+    /// serializable caller data while authority must be supplied at the exact
+    /// network-policy boundary. [`LocalTargetAuthorization`] cannot currently
+    /// be minted by public callers.
+    ///
+    /// WARNING: this uses [`SystemResolver`] and therefore performs blocking
+    /// DNS I/O for a domain-name host. Async callers must offload the call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`SearchConstraints::check_url_with`]. The
+    /// capability bypasses only address-range classification; scheme, userinfo,
+    /// resolution, and domain allow/deny checks remain mandatory.
+    pub fn check_url_with_local_authorization(
+        &self,
+        url: &Url,
+        authorization: &LocalTargetAuthorization,
+    ) -> Result<ValidatedTarget> {
+        self.check_url_with_policy(url, &SystemResolver, Some(authorization))
+    }
+
+    fn check_url_with_policy(
+        &self,
+        url: &Url,
+        resolver: &dyn Resolver,
+        local_authorization: Option<&LocalTargetAuthorization>,
+    ) -> Result<ValidatedTarget> {
         let scheme = url.scheme();
         ensure!(
             ALLOWED_SCHEMES.contains(&scheme),
@@ -134,7 +177,7 @@ impl SearchConstraints {
             }
         );
 
-        if !self.allow_local_targets {
+        if local_authorization.is_none() {
             for addr in &addrs {
                 ensure!(
                     !is_blocked_address(*addr),
@@ -211,14 +254,14 @@ impl Resolver for SystemResolver {
 }
 
 /// Proof that a URL passed the full network-target policy in
-/// [`SearchConstraints::check_url`] / [`SearchConstraints::check_url_with`],
-/// carrying the resolution that proof was based on.
+/// [`SearchConstraints::check_url`], [`SearchConstraints::check_url_with`],
+/// or [`SearchConstraints::check_url_with_local_authorization`], carrying the
+/// resolution that proof was based on.
 ///
 /// This is the enforced capability, not an optional convention:
-/// `#[non_exhaustive]` plus the absence of any public constructor other
-/// than `check_url`/`check_url_with` means no other crate can build one
-/// from scratch (a `ValidatedTarget { .. }` struct literal outside this
-/// crate does not compile, even though every field is `pub`).
+/// private fields plus the absence of any public constructor other than those
+/// three policy checks mean no other crate can build one from scratch or
+/// retarget it after validation.
 /// [`super::Crawler`] requires one as its entry parameter (see
 /// [`super::Crawler::fetch_page`]), so calling it with a URL that was
 /// never checked does not compile -- see that trait's `# Enforcement`
@@ -230,15 +273,37 @@ impl Resolver for SystemResolver {
 /// validated resolution instead of re-resolving is what closes the
 /// check-time/connect-time gap a DNS answer can otherwise change across
 /// (rebinding).
+///
+/// ```compile_fail
+/// # use sylloge::ValidatedTarget;
+/// # use url::Url;
+/// fn retarget(target: &mut ValidatedTarget, url: Url) {
+///     target.url = url;
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ValidatedTarget {
     /// The exact URL this target was validated for. A compliant fetch
     /// issues its request against this URL (path, query, `Host`
     /// header/TLS SNI) while connecting the socket to `addrs`.
-    pub url: Url,
+    url: Url,
     /// Concrete resolved address(es) that passed the policy. Non-empty.
-    pub addrs: Vec<IpAddr>,
+    addrs: Vec<IpAddr>,
+}
+
+impl ValidatedTarget {
+    /// The immutable URL for which this policy proof was issued.
+    #[must_use]
+    pub const fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// The immutable, non-empty resolution that passed policy.
+    #[must_use]
+    pub fn addrs(&self) -> &[IpAddr] {
+        &self.addrs
+    }
 }
 
 // WHY: several ranges relevant to SSRF (240.0.0.0/4 reserved,
@@ -754,25 +819,31 @@ mod tests {
     }
 
     #[test]
-    fn check_url_allow_local_targets_permits_loopback() {
-        let c = SearchConstraints::default().with_local_targets_allowed();
+    fn local_target_authorization_permits_loopback() {
+        let c = SearchConstraints::default();
+        let authorization = LocalTargetAuthorization { _private: () };
         assert!(
-            c.check_url(&Url::parse("http://127.0.0.1/admin").unwrap())
-                .is_ok()
+            c.check_url_with_local_authorization(
+                &Url::parse("http://127.0.0.1/admin").unwrap(),
+                &authorization,
+            )
+            .is_ok()
         );
     }
 
     #[test]
-    fn check_url_allow_local_targets_does_not_bypass_domain_denylist() {
+    fn local_target_authorization_does_not_bypass_domain_denylist() {
         // WHY: the two checks are independent layers -- the local-target
         // escape hatch only reopens the address-class check, never the
         // caller's own domain policy.
-        let c = SearchConstraints::default()
-            .with_local_targets_allowed()
-            .with_denylist(vec!["127.0.0.1".to_owned()]);
+        let c = SearchConstraints::default().with_denylist(vec!["127.0.0.1".to_owned()]);
+        let authorization = LocalTargetAuthorization { _private: () };
         assert!(
-            c.check_url(&Url::parse("http://127.0.0.1/admin").unwrap())
-                .is_err()
+            c.check_url_with_local_authorization(
+                &Url::parse("http://127.0.0.1/admin").unwrap(),
+                &authorization,
+            )
+            .is_err()
         );
     }
 
@@ -784,7 +855,7 @@ mod tests {
         let c = SearchConstraints::default();
         let url = Url::parse("http://8.8.8.8/").unwrap();
         let target = c.check_url(&url).unwrap();
-        assert_eq!(target.addrs, vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-        assert_eq!(target.url, url);
+        assert_eq!(target.addrs(), [IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+        assert_eq!(target.url(), &url);
     }
 }

@@ -1,10 +1,10 @@
 //! Research result schema.
 //!
 //! The normalized envelope every provider returns. `ResearchResult` is the
-//! single type downstream consumers (aletheia nous, dioptron, akroasis) see
-//! regardless of which Tier-0/1/2/3 provider actually served the query. The
-//! provenance trail records which providers were tried in what order so
-//! fallback-chain decisions are auditable after the fact.
+//! single type the planned downstream consumers (aletheia nous, dioptron,
+//! akroasis) will see regardless of which Tier-0/1/2/3 provider actually
+//! served the query. The provenance trail records which providers were tried
+//! in what order so fallback-chain decisions are auditable after the fact.
 
 use std::collections::BTreeMap;
 

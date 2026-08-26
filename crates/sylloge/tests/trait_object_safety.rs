@@ -134,7 +134,7 @@ impl Crawler for StubCrawler {
                     constraints.check_url(redirect)?;
                     redirect.clone()
                 }
-                None => target.url.clone(),
+                None => target.url().clone(),
             };
             PageContent::new(
                 final_url,

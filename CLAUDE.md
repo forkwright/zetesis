@@ -17,12 +17,15 @@ provider/result/budget API surface; `zetesis` re-exports it as the facade.
 ## Repository conventions
 
 - Fleet-standard kanon conventions apply: snafu errors, tokio-async, no blanket clippy suppressions, `#[non_exhaustive]` on every pub enum, `cfg_attr(not(test), deny(unwrap_used/expect_used))` in library crates.
-- License: AGPL-3.0-or-later. Matches the fleet default. Client-contract (Summus-adjacent) work does NOT go here.
+- License map:
+  - Code and tooling: [PolyForm Noncommercial 1.0.0](LICENSE).
+  - Documentation: [CC BY-NC-ND 4.0](LICENSE-DOCS).
+  Commercial client-contract work does NOT go here.
 - Workspace member crates under `crates/<crate-name>/`; flat layout (no nested `crates/zetesis/<subcrate>/` pattern unless the workspace grows past ~10 crates).
 
 ## Why this repo instead of a kanon crate
 
-Zetesis has at least three active/planned fleet consumers (aletheia, dioptron, akroasis) plus likely non-fleet use. Provider APIs (Brave, Exa, etc.) shift pricing and rate limits frequently, so release cadence naturally differs from kanon's. Public repo from day one avoids forge-private-access friction for any consumer, matches the "spin out when big enough" pattern established by pinax (pending Phase 4 checkpoint).
+Zetesis has three planned fleet consumers (aletheia, dioptron, akroasis) plus likely non-fleet use. Provider APIs (Brave, Exa, etc.) shift pricing and rate limits frequently, so release cadence naturally differs from kanon's. Public repo from day one avoids forge-private-access friction for any consumer, matches the "spin out when big enough" pattern established by pinax (pending Phase 4 checkpoint).
 
 ## Key design principles
 
@@ -37,15 +40,15 @@ Zetesis has at least three active/planned fleet consumers (aletheia, dioptron, a
 - Free-tier APIs have aggressive rate limits; `sylloge` tracks free-tier quotas separately from paid spend.
 - Deep research can blow $10+ in token costs per query if orchestrated against Anthropic/OpenAI. Default backend is local logismos.
 - `menos gpu research` mode (Phase 6, in coordination with menos-ops) is exclusive with `menos gpu inference` on the W7900; operator picks.
-- License is AGPL-3.0-or-later - downstream consumers must comply; Summus-adjacent client work must not depend on zetesis.
+- Downstream use must comply with the scoped license map above; commercial client-contract work must not depend on zetesis.
 
 ## Related
 
 | Project | Relationship |
 |---------|-------------|
-| aletheia (nous agents) | Primary consumer |
-| dioptron | Consumer for web-runtime knowledge ingestion |
-| akroasis | Consumer for OSINT public-source research |
+| aletheia (nous agents) | Planned research consumer adapter |
+| dioptron | Planned static-acquisition consumer adapter |
+| akroasis | Planned broader OSINT public-source research consumer |
 | logismos | Self-hosted orchestration backend |
 | koina + fjall | Cache + budget ledger persistence |
 | heurēma | Future semantic rerank of Tier 0 results |

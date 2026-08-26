@@ -32,14 +32,16 @@ Zetesis takes a different shape:
 
 ## Consumer map
 
-- **aletheia** - nous agents call zetesis as their primary research tool
-- **dioptron** - sovereign web runtime; D5 tiered knowledge store ingests zetesis results
-- **akroasis** - OSINT domain public-source research
+- **aletheia** - planned nous-agent research adapter
+- **dioptron** - planned static-acquisition consumer adapter for the sovereign web runtime
+- **akroasis** - planned broader OSINT public-source research consumer
 
 ## Non-goals
 
 - Not a conversational search UI (consumer concern)
-- Not a content crawler (route to Firecrawl / trafilatura when needed)
+- Not a recursive or browser-session crawler. The consumer-neutral bounded
+  static-acquisition state machine is Zetesis's architectural responsibility;
+  interactive rendering, sessions, and scripted actions belong to dioptron.
 - Not an LLM synthesis engine (consumer's LLM layer)
 - Not a vector store (that is `heurēma`)
 - Not a credentials manager (operator vault owns API keys)
@@ -55,7 +57,8 @@ Current planning authority lives in the internal project state record. This publ
 
 ## License
 
-AGPL-3.0-or-later
+- Code and tooling: [PolyForm Noncommercial 1.0.0](LICENSE).
+- Documentation: [CC BY-NC-ND 4.0](LICENSE-DOCS).
 
 <!-- kanon:auto-start -->
 ## Repository Metadata

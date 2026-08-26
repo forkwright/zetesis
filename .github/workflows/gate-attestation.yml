@@ -47,7 +47,7 @@ jobs:
       check_cmd: "cargo check --workspace --all-targets"
       clippy_cmd: "cargo clippy --workspace --all-targets -- -D warnings"
       nextest_cmd: "cargo nextest run --workspace"
-      doctest_cmd: ""
+      doctest_cmd: "cargo test --workspace --doc"
       system_packages: ""
       needs_fleet_repo_token: false
       rust_cache_key: "gate-attestation"
