@@ -17,7 +17,7 @@ provider/result/budget API surface; `zetesis` re-exports it as the facade.
 ## Repository conventions
 
 - Fleet-standard kanon conventions apply: snafu errors, tokio-async, no blanket clippy suppressions, `#[non_exhaustive]` on every pub enum, `cfg_attr(not(test), deny(unwrap_used/expect_used))` in library crates.
-- License: AGPL-3.0-or-later. Matches the fleet default. Client-contract (Summus-adjacent) work does NOT go here.
+- License: PolyForm Noncommercial 1.0.0, as declared by `Cargo.toml` and `LICENSE`. Commercial client-contract work does NOT go here.
 - Workspace member crates under `crates/<crate-name>/`; flat layout (no nested `crates/zetesis/<subcrate>/` pattern unless the workspace grows past ~10 crates).
 
 ## Why this repo instead of a kanon crate
@@ -37,7 +37,7 @@ Zetesis has at least three active/planned fleet consumers (aletheia, dioptron, a
 - Free-tier APIs have aggressive rate limits; `sylloge` tracks free-tier quotas separately from paid spend.
 - Deep research can blow $10+ in token costs per query if orchestrated against Anthropic/OpenAI. Default backend is local logismos.
 - `menos gpu research` mode (Phase 6, in coordination with menos-ops) is exclusive with `menos gpu inference` on the W7900; operator picks.
-- License is AGPL-3.0-or-later - downstream consumers must comply; Summus-adjacent client work must not depend on zetesis.
+- License is PolyForm Noncommercial 1.0.0 - downstream consumers must comply; commercial client-contract work must not depend on zetesis.
 
 ## Related
 

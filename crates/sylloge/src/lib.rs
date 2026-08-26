@@ -71,7 +71,7 @@ pub use freshness::{
     PublicationProvenance, PublicationTime, PublicationTimeCapability, evaluate_freshness,
 };
 pub use local_deep_research::LocalDeepResearch;
-pub use net_policy::{Resolver, SystemResolver, ValidatedTarget};
+pub use net_policy::{LocalTargetAuthorization, Resolver, SystemResolver, ValidatedTarget};
 pub use provider::{BoxFut, Provider};
 pub use query::QueryShape;
 pub use result::{ProvenanceEntry, ResearchResult, ResultHit};

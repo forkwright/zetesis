@@ -271,9 +271,9 @@ pub enum Error {
     /// private, link-local, unspecified, multicast, or reserved), or a
     /// domain allow/deny mismatch. Permanent: retrying the same URL
     /// cannot succeed under the same [`super::SearchConstraints`] (the
-    /// only way to admit a blocked address is
-    /// [`super::SearchConstraints::allow_local_targets`], a constraints
-    /// change, not a retry).
+    /// only way to admit a blocked address is a separately supplied
+    /// [`super::LocalTargetAuthorization`], an authority change rather than
+    /// caller-data mutation or a retry).
     #[snafu(display("network-target policy rejected {url}: {reason}"))]
     UnsafeTarget {
         /// The rejected URL.
