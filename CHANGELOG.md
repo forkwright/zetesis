@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.6](https://github.com/forkwright/zetesis/compare/v0.0.5...v0.0.6) (2026-08-26)
+
+
+### Bug Fixes
+
+* **sylloge:** harden static acquisition boundaries ([#78](https://github.com/forkwright/zetesis/issues/78)) ([c922b43](https://github.com/forkwright/zetesis/commit/c922b43b909cf43179b2bab6730ca40e9f7edf0b))
+
 ## [0.0.5](https://github.com/forkwright/zetesis/compare/v0.0.4...v0.0.5) (2026-08-09)
 
 
