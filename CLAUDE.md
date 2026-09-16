@@ -1,6 +1,6 @@
 <!--
 scope: zetesis repo conventions (research substrate: Tier-0 free APIs, self-hosted deep research, budget ledger)
-defers_to: menos-ops CLAUDE.md for machine topology (including `menos gpu research` mode); operator global CLAUDE.md for operator principles; kanon standards for universal engineering policy
+defers_to: host-operations docs for machine topology and GPU mode selection; operator global CLAUDE.md for operator principles; kanon standards for universal engineering policy
 tightens: free-first routing discipline, budget as first-class constraint, caching-by-default via koina+fjall
 -->
 
@@ -39,7 +39,7 @@ Zetesis has three planned fleet consumers (aletheia, dioptron, akroasis) plus li
 
 - Free-tier APIs have aggressive rate limits; `sylloge` tracks free-tier quotas separately from paid spend.
 - Deep research can blow $10+ in token costs per query if orchestrated against Anthropic/OpenAI. Default backend is local logismos.
-- `menos gpu research` mode (Phase 6, in coordination with menos-ops) is exclusive with `menos gpu inference` on the W7900; operator picks.
+- GPU research mode (Phase 6) is mutually exclusive with GPU inference mode on a single-GPU host; the operator picks which one holds the device.
 - Downstream use must comply with the scoped license map above; commercial client-contract work must not depend on zetesis.
 
 ## Related
@@ -52,7 +52,7 @@ Zetesis has three planned fleet consumers (aletheia, dioptron, akroasis) plus li
 | logismos | Self-hosted orchestration backend |
 | koina + fjall | Cache + budget ledger persistence |
 | heurēma | Future semantic rerank of Tier 0 results |
-| menos-ops | `menos gpu research` mode owner |
+| host-operations environment | Owns GPU research/inference mode selection |
 | hermeneus (inside aletheia) | Sibling primitive: hermeneus unifies LLM providers, zetesis unifies research providers |
 
 <!-- kanon:auto-start -->
