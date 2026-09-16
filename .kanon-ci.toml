@@ -5,9 +5,13 @@
 # Forge CI pipeline for forkwright/zetesis.
 #
 # Mirrors the hardcoded default Rust gate (fmt → check → clippy → nextest
-# → lint) but pins per-stage build + test concurrency to 8. Without this
-# cap, cargo defaults to num_cpus (64 on this Threadripper) and parallel
-# rustc + nextest processes can contend with other fleet work.
+# → lint) but pins per-stage build + test concurrency to 8. The pin is a
+# co-residency cap: cargo's default parallelism is the host's total core
+# count, so an unpinned run sizes itself to the entire machine rather than
+# to its share of it and contends with whatever else is running there.
+# A dedicated machine does not retire the pin, because concurrent runs and
+# co-resident services still share those cores; only an executor that
+# confines each run to its own CPU budget does.
 #
 # Keep in sync with `crates/archeion/src/ci_config.rs::default_rust_gate`
 # when the upstream default changes — only the `--jobs` / `--test-threads`
