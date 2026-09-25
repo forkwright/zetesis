@@ -8,6 +8,10 @@
 //! envelope in [`Acquisition`] so the consumer keeps them in its own custody,
 //! keyed by [`BodyRecord::decoded_sha256`].
 //!
+//! Digests identify bytes. They are integrity evidence, not a verdict that
+//! the content is accurate, safe, or authoritative; that judgment belongs
+//! to the consumer.
+//!
 //! The envelope records full URLs, including query strings, exactly as
 //! requested and followed (userinfo is never recorded). Whether a query
 //! string is sensitive is the consumer's policy: it decides where the
