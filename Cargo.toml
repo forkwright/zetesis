@@ -30,20 +30,70 @@ await_holding_lock = "deny"
 [workspace.dependencies]
 ciborium = "0.2"
 futures = "0.3"
+# WHY: static acquisition needs `Empty` (the GET request body) and
+# `BodyExt::frame` (bounded incremental body reads). Its own dependencies
+# (bytes, http, http-body, pin-project-lite) are already in the graph through
+# hyper, so it adds one small crate instead of a hand-written `Body` impl.
+http-body-util = { version = "0.1", default-features = false }
+# WHY: static acquisition owns a one-hop HTTP/1.1 exchange over a socket it
+# connected itself (`client::conn::http1`), which is what keeps redirects,
+# DNS, and connection binding under sylloge's policy. reqwest and hyper-util's
+# legacy client bundle a resolver, a connection pool, proxy-environment
+# handling, and automatic redirects -- each a way around that policy -- so the
+# lower-level hyper connection API is the lightest option that leaves them out.
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+# WHY: `rt::TokioIo` adapts a tokio stream to hyper's I/O traits. Writing that
+# adapter locally needs `unsafe` (`ReadBufCursor::as_mut`/`advance`), which the
+# workspace denies; the `tokio` feature alone adds no crate beyond tokio.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 jiff = { version = "0.2", features = ["serde"] }
 language-tags = { version = "0.3", features = ["serde"] }
+# WHY: SHA-256 of the TLS peer's leaf certificate for hop evidence. ring is
+# already in the graph as rustls's crypto provider, so a direct dependency
+# adds no crate (a separate `sha2` stack would).
+ring = { version = "0.17", default-features = false }
+# WHY: TLS for static acquisition. `ring` is the provider set explicitly on
+# each `ClientConfig` (never installed process-wide); it avoids aws-lc-rs's
+# C/CMake build. `tls12` stays enabled because TLS 1.2-only origins are still
+# common on the public web; `logging` and post-quantum key exchange (which
+# requires aws-lc-rs) are left off.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# WHY: loads the operating system's trust store into a rustls root store.
+# Chosen over rustls-platform-verifier: on Linux the platform verifier is this
+# crate plus webpki verification anyway, while it also pulls JNI,
+# security-framework, and Windows crates, and it has no plain custom-root
+# constructor for hermetic tests. Chosen over webpki-roots: a compiled-in
+# bundle goes stale between releases and adds the CDLA-Permissive-2.0 license.
+rustls-native-certs = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 snafu = "0.9"
+# WHY: the tokio-rustls handshake adapter is the thin standard glue between
+# rustls and tokio streams; hand-writing it would duplicate its state machine.
+# Default features would enable aws-lc-rs and logging, so the rustls feature
+# set is chosen by the `rustls` entry above instead.
+tokio-rustls = { version = "0.26", default-features = false }
 url = { version = "2", features = ["serde"] }
 
 elenkhos = { version = "0.0.6", path = "crates/elenkhos" }
 sylloge = { version = "0.0.6", path = "crates/sylloge" }
 synopsis = { version = "0.0.6", path = "crates/synopsis" }
 
+# WHY: features are chosen per member so the library build of sylloge enables
+# only what static acquisition uses (`net`, `io-util`, `rt`, `time`) and the
+# test-only runtime features (`rt-multi-thread`, `macros`, `test-util`) stay in
+# dev-dependencies.
 [workspace.dependencies.tokio]
 version = "1"
-features = ["rt-multi-thread", "macros", "sync", "time"]
+default-features = false
+
+# WHY: test fixtures mint a throwaway certificate for a hermetic local TLS
+# origin instead of committing a private key. `ring` matches the provider the
+# library already uses; `pem` is unused because rustls accepts DER directly.
+[workspace.dependencies.rcgen]
+version = "0.14"
+default-features = false
+features = ["ring"]
 
 [profile.dev.package."*"]
 opt-level = 2

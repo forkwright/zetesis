@@ -4,7 +4,7 @@
 
 Sovereign research substrate: one Rust interface over research and search providers, with budget enforcement, quota accounting, cited result normalization, and bounded static acquisition. Most of that surface is still planned. The tables below separate what has landed from what has not.
 
-**Status:** pre-release (`0.0.x`). The four-crate workspace has landed. `sylloge` carries the provider, constraint, network-target, citation, result, cost, budget, and deep-research lifecycle types, and `zetesis` re-exports them. No provider adapter, HTTP client, cache, durable ledger, model binding, or daemon exists yet. The [contract baseline](docs/design/contract-baseline.md) records what each public type enforces today and what is caller convention.
+**Status:** pre-release (`0.0.x`). The four-crate workspace has landed. `sylloge` carries the provider, constraint, network-target, static-acquisition, citation, result, cost, budget, and deep-research lifecycle types, and `zetesis` re-exports them. The only HTTP client is `StaticAcquirer` (anonymous static GET). No provider adapter, cache, durable ledger, model binding, or daemon exists yet. The [contract baseline](docs/design/contract-baseline.md) records what each public type enforces today and what is caller convention.
 **Open work:** `_llm/current_state.toml` lists the public open threads. Roadmap and blocker status are maintained outside this repository.
 
 ## Why
@@ -25,7 +25,7 @@ Zetesis takes a different shape:
 | Crate | Landed | Planned |
 |-------|--------|---------|
 | `zetesis` | Facade re-exporting the `sylloge` surface; `steelman` and `briefing` aliases for the two reserved crates | CLI, daemon binary, consumer adapter wiring |
-| `sylloge` | `Provider`, `DeepResearch`, and `Crawler` traits; `SearchConstraints` with the fail-closed network-target check and non-forgeable `ValidatedTarget`; citation, result, freshness, cost, and budget types; in-memory `LocalDeepResearch` with an offline loop fixture | Tier-0 provider adapters, routing, durable reservation ledger, cache, `StaticAcquirer` and the evidence envelope (replacing `Crawler`), deep-inquiry loop against a model contract |
+| `sylloge` | `Provider` and `DeepResearch` traits; `SearchConstraints` with the fail-closed network-target check and non-forgeable `ValidatedTarget`; `StaticAcquirer` (anonymous static `GET` with per-hop validation, the `Connector` seam, and hop records); citation, result, freshness, cost, and budget types; in-memory `LocalDeepResearch` with an offline loop fixture | Tier-0 provider adapters, routing, durable reservation ledger, cache, the static-acquisition evidence envelope with decoding and extraction, deep-inquiry loop against a model contract |
 | `elenkhos` | Reserved crate boundary (marker type) | Retrospective steel-manning engine |
 | `synopsis` | Reserved crate boundary (marker type) | Briefing synthesizer |
 

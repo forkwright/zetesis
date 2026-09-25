@@ -9,7 +9,7 @@ source_docs = [
 ]
 
 [state]
-summary = "Zetesis is pre-release. The four-crate workspace carries the sylloge typed surface (provider and deep-research traits, constraints with a fail-closed network-target check, citations, results, cost and in-memory budget arithmetic, in-memory LocalDeepResearch with an offline five-node fixture), re-exported by the zetesis facade. No provider adapter, HTTP client, cache, durable ledger, or model binding exists. docs/design/contract-baseline.md records what each public type enforces versus caller convention."
+summary = "Zetesis is pre-release. The four-crate workspace carries the sylloge typed surface (provider and deep-research traits, constraints with a fail-closed network-target check, StaticAcquirer for anonymous static GET, citations, results, cost and in-memory budget arithmetic, in-memory LocalDeepResearch with an offline five-node fixture), re-exported by the zetesis facade. StaticAcquirer is the only HTTP client; no provider adapter, cache, durable ledger, or model binding exists. docs/design/contract-baseline.md records what each public type enforces versus caller convention."
 current_phase = "Phase 00: contract baseline. S1 reconciles the implemented API and source docs with the accepted consumer boundaries."
 updated = "2026-09-25"
 
@@ -55,7 +55,7 @@ item = "Scope, four-crate decomposition, free-first provider tiers, and consumer
 
 [[open_threads]]
 name = "Bounded static acquisition"
-status = "Open, tracked by zetesis#48. Phase 01 S1 adds StaticAcquirer with private one-hop transport, per-hop validation, the Connector seam, and hop records, and retires Crawler and PageContent. Phase 01 S2 adds evidence envelope v1, fingerprint, replay, content decoding, and static extraction. Contract: docs/design/contract-baseline.md sections 7 to 10."
+status = "Open, tracked by zetesis#48. Phase 01 S1 landed StaticAcquirer with private one-hop transport, per-hop validation, the Connector seam, and hop records, and retired Crawler and PageContent. Phase 01 S2 adds evidence envelope v1, fingerprint, replay, content decoding, and static extraction. Contract: docs/design/contract-baseline.md sections 7 to 10."
 
 [[open_threads]]
 name = "Paid-research authorization"

@@ -142,8 +142,9 @@ pub enum Error {
     },
 
     /// A caller-supplied constraint cannot be applied as written (for
-    /// example a domain-list entry that names no host). Permanent: the
-    /// caller must correct the constraint. Refusing is the fail-closed
+    /// example a domain-list entry that names no host, or an
+    /// [`super::AcquisitionLimits`] value above its crate ceiling).
+    /// Permanent: the caller must correct the constraint. Refusing is the fail-closed
     /// alternative to silently treating an unusable allow/deny entry as
     /// "matches nothing", which weakens a denylist without any signal.
     #[snafu(display("invalid constraint `{field}`: {reason}"))]
@@ -191,10 +192,9 @@ pub enum Error {
         location: snafu::Location,
     },
 
-    /// The operation is not supported by the chosen provider (e.g. calling
-    /// [`super::Crawler::fetch_page`] on a provider that only implements
-    /// [`super::Provider`]). Permanent; the caller picked the wrong
-    /// trait.
+    /// The operation is not supported by the chosen provider (e.g. asking a
+    /// search-only [`super::Provider`] for a capability it does not
+    /// implement). Permanent; the caller picked the wrong backend.
     #[snafu(display("operation not supported: {reason}"))]
     Unsupported {
         /// Explanation (what was attempted, what the provider offers
@@ -270,8 +270,8 @@ pub enum Error {
     /// [`super::SearchConstraints::check_url`] reports a domain
     /// allow/deny mismatch as [`Error::UnsafeTarget`] instead (it is one
     /// rejection reason among several the same call checks); this variant
-    /// stays available for a [`super::Crawler`] implementation with its
-    /// own domain policy layered on top.
+    /// stays available for a consumer adapter with its own domain policy
+    /// layered on top.
     #[snafu(display("domain denied by constraints: {url}"))]
     DomainDenied {
         /// The rejected URL.
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn unsupported_is_permanent() {
         let e: Error = UnsupportedSnafu {
-            reason: "crawler not implemented".to_owned(),
+            reason: "capability not implemented".to_owned(),
         }
         .build();
         assert!(e.is_permanent());

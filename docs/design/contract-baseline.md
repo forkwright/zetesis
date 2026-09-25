@@ -47,7 +47,7 @@ behavior.
 | `BoxFut` (`provider.rs:25`) | `Send` boxed future; keeps the three traits dyn-compatible. | None. | Implemented |
 | `Provider` (`provider.rs:51-84`) | Object safety; `search(query: &str, constraints: &SearchConstraints)` signature (`provider.rs:79-83`). `publication_time_capability` defaults to `Unsupported` (`provider.rs:67-69`). | Unique lowercase `name()` (`provider.rs:35-37`); honoring `max_results`, domain lists, language, and freshness; cancellation safety when the future is dropped (`provider.rs:44-50`). `search` receives no consumer identity, ledger handle, attempt identity, or credential reference, so it cannot authorize or charge anything. | Trait implemented; no provider adapter exists |
 | `DeepResearch` (`deep.rs:52-94`) | Object safety; `submit`/`poll`/`fetch`/`cancel` signatures. | Every per-state rule in `deep.rs:25-51`: prompt `submit`, idempotent `poll`, `TaskNotReady` versus `TaskUnavailable` on `fetch`, idempotent `cancel`. `submit(query, depth)` (`deep.rs:63`) carries no budget, constraints, consumer identity, or idempotency key. | Trait implemented; `LocalDeepResearch` is the only implementation |
-| `Crawler` (`crawler.rs:79-103`) | The request URL must be a `ValidatedTarget` (`crawler.rs:98-102`); a bare `Url` does not compile (compile-fail doctest, `crawler.rs:65-71`). | Checking every redirect target, propagating the check error, and connecting only to `ValidatedTarget::addrs` (`crawler.rs:25-45`, restated as prose-only at `crawler.rs:73-78`). The separate `constraints` argument need not match the constraints the target was validated under. The module doc names external extractors (Firecrawl, trafilatura) as implementation owners (`crawler.rs:5-8`), which the accepted boundary supersedes. | Convention only past the first hop; retired in Phase 01 S1 |
+| `Crawler` (`crawler.rs:79-103`) | The request URL must be a `ValidatedTarget` (`crawler.rs:98-102`); a bare `Url` does not compile (compile-fail doctest, `crawler.rs:65-71`). | Checking every redirect target, propagating the check error, and connecting only to `ValidatedTarget::addrs` (`crawler.rs:25-45`, restated as prose-only at `crawler.rs:73-78`). The separate `constraints` argument need not match the constraints the target was validated under. The module doc names external extractors (Firecrawl, trafilatura) as implementation owners (`crawler.rs:5-8`), which the accepted boundary supersedes. | Retired in Phase 01 S1; `StaticAcquirer` validates every hop |
 | `Resolver` (`net_policy.rs:225-236`) | Synchronous `resolve(host, port) -> io::Result<Vec<IpAddr>>`. Every returned address is still classified by the target policy, so a resolver can narrow but not widen what passes. | Offloading blocking implementations from an async executor. | Implemented |
 | `SystemResolver` (`net_policy.rs:244-254`) | OS lookup through `ToSocketAddrs`. | Blocking DNS; async callers must use `spawn_blocking` (`net_policy.rs:238-243`). | Implemented |
 
@@ -56,10 +56,10 @@ behavior.
 | Item | Enforced | Caller convention today | Status |
 |------|----------|-------------------------|--------|
 | `SearchConstraints` (`constraints.rs:33-74`) | `#[non_exhaustive]` blocks struct literals outside the crate; `deny_unknown_fields` rejects unknown keys, including the removed `allow_local_targets` flag (`constraints.rs:35`, test at `:820-825`). `language` parses as a BCP-47 tag. `Default` is 10 results with a free-only budget (`constraints.rs:152-161`). | All fields are `pub` and mutable. `max_results` accepts any `usize`, including 0. Domain entries are stored as given. An entry that normalizes to empty never matches (`constraints.rs:179-181`), so it is silently ignored in a denylist. Matching is ASCII-lowercase suffix comparison against the parsed host (`constraints.rs:166-196`), so a non-ASCII entry never matches the punycode host the URL parser produces, and IPv4 literal hosts match by trailing octets. | Implemented as a value; entry canonicalization changes in Phase 00 S1 (section 4.1) |
-| `SearchConstraints::check_url`, `check_url_with` (`net_policy.rs:56-58`, `:102-104`) | Order: scheme in `{http, https}`, no userinfo, host present, resolution non-empty, no resolved address in a blocked range, denylist, allowlist (`net_policy.rs:130-216`). IPv4-mapped and IPv4-compatible IPv6 are classified as IPv4 (`net_policy.rs:374-381`). Resolver failure maps to transient `TransientIo`; every policy rejection maps to permanent `UnsafeTarget`. | Calling it on redirect targets. No port policy exists. Every resolver error is classified transient, including a deliberate refusal by a consumer's resolver wrapper. | Implemented for one URL |
+| `SearchConstraints::check_url`, `check_url_with` (`net_policy.rs:56-58`, `:102-104`) | Order: scheme in `{http, https}`, no userinfo, host present, resolution non-empty, no resolved address in a blocked range, denylist, allowlist (`net_policy.rs:130-216`). IPv4-mapped and IPv4-compatible IPv6 are classified as IPv4 (`net_policy.rs:374-381`). Resolver failure maps to transient `TransientIo`; every policy rejection maps to permanent `UnsafeTarget`. | Calling it on redirect targets. No port policy exists. Every resolver error is classified transient, including a deliberate refusal by a consumer's resolver wrapper. | Implemented for one URL; since Phase 01 S1 a resolver `PermissionDenied` is a permanent `UnsafeTarget` |
 | `ValidatedTarget` (`net_policy.rs:284-307`) | Private fields, `#[non_exhaustive]`, no serde, and no constructor other than the three `check_url*` methods; cannot be forged or retargeted (compile-fail doctest, `net_policy.rs:277-283`). `addrs()` is non-empty. | The proof carries no timestamp and no record of the constraints or authority it was issued under; a holder may keep it past the DNS answer's lifetime. | Implemented |
 | `LocalTargetAuthorization` (`net_policy.rs:37-41`) | Private field, not `Clone`, no serde, no public constructor (compile-fail doctest, `net_policy.rs:33-36`). Bypasses address-range classification only; scheme, userinfo, resolution, and domain checks still apply (`net_policy.rs:117-121`). | No public mint exists, so `check_url_with_local_authorization` (`net_policy.rs:122-128`) is unreachable from other crates. It accepts only `SystemResolver`, so a consumer resolver wrapper cannot be combined with local authority. | Implemented; minting authority not defined |
-| `PageContent` (`constraints.rs:353-540`) | Private fields; `new`, `with_extracted_text`, and the deserializer share the limits `MAX_URL_BYTES` 8 KiB, `MAX_CONTENT_TYPE_BYTES` 1 KiB, `MAX_BODY_BYTES` 10 MiB, `MAX_TEXT_BYTES` 4 MiB (`constraints.rs:391-403`). | The limits apply after the caller has already allocated the buffer; this is not streaming protection (`constraints.rs:340-346`). | Implemented; retired in Phase 01 S1 (the limit values move to `AcquisitionLimits` ceilings) |
+| `PageContent` (`constraints.rs:353-540`) | Private fields; `new`, `with_extracted_text`, and the deserializer share the limits `MAX_URL_BYTES` 8 KiB, `MAX_CONTENT_TYPE_BYTES` 1 KiB, `MAX_BODY_BYTES` 10 MiB, `MAX_TEXT_BYTES` 4 MiB (`constraints.rs:391-403`). | The limits apply after the caller has already allocated the buffer; this is not streaming protection (`constraints.rs:340-346`). | Retired in Phase 01 S1; the limit values are `AcquisitionLimits` ceilings |
 
 ### 3.3 Budget and spend
 
@@ -199,7 +199,7 @@ baseline revision. The last column names the change that corrects each.
 
 | Contract | Owner | Zetesis provides | Consumer supplies | Status |
 |----------|-------|------------------|-------------------|--------|
-| Static acquisition | Zetesis | Target and per-hop validation, one-hop transport, bounded transfer and decoding, static text extraction, evidence envelope, fingerprint, replay | Invocation authority and its own resource reservation, `AcquisitionLimits`, `Resolver` and `Connector` adapters for its egress policy, body custody, verbatim envelope storage. Dioptron keeps sessions, rendering, scripted browsing, and browser actions. | Planned (Phase 01) |
+| Static acquisition | Zetesis | Target and per-hop validation, one-hop transport, bounded transfer and decoding, static text extraction, evidence envelope, fingerprint, replay | Invocation authority and its own resource reservation, `AcquisitionLimits`, `Resolver` and `Connector` adapters for its egress policy, body custody, verbatim envelope storage. Dioptron keeps sessions, rendering, scripted browsing, and browser actions. | Transport and per-hop validation implemented (Phase 01 S1); envelope planned (Phase 01 S2) |
 | Provider search | Zetesis | `Provider` trait, normalized `ResearchResult`, citations and provenance, cost report, error class | Query, constraints, consumer scope identifier, credential references, explicit paid authorization | Trait implemented; adapters planned |
 | Budget and paid-spend ledger | Zetesis for paid provider spend; each consumer for its own invocation budget | Budget arithmetic today; the durable reservation ledger and its identities when zetesis#47 lands | Authenticated consumer identity, configured caps, the reservation of its own authority (for example Dioptron's invocation budget) | Arithmetic implemented in memory; ledger planned (zetesis#47) |
 | Cache | Zetesis | Keyed by query and attempt identity with per-provider freshness windows; never stores secret values | Nothing beyond scope identifiers | Planned (storage in Phase 03 S1) |
@@ -208,7 +208,7 @@ baseline revision. The last column names the change that corrects each.
 | Retrospective (steel-manning) | Zetesis (`elenkhos`) | Reserved crate boundary | Claims to review | Marker type only |
 | Briefing | Zetesis (`synopsis`) | Reserved crate boundary | Audience and delivery | Marker type only |
 | Credentials | Operator vault or consumer | Accepts credential references and resolves them per call through a consumer-supplied resolver; never stores, caches, logs, or keys on a value | Credential values, rotation, scope | No credential-carrying type exists |
-| Egress | Consumer egress policy; Zetesis target policy | Fail-closed target classification that only `LocalTargetAuthorization` can relax | Stricter policy through `Resolver` (refuse before lookup) and `Connector` (refuse to connect) wrappers | Target policy implemented; `Connector` planned (Phase 01 S1) |
+| Egress | Consumer egress policy; Zetesis target policy | Fail-closed target classification that only `LocalTargetAuthorization` can relax | Stricter policy through `Resolver` (refuse before lookup) and `Connector` (refuse to connect) wrappers | Target policy and `Connector` seam implemented (Phase 01 S1) |
 | Knowledge admission | Consumer | Cited results and envelopes as candidates | Classification, admission, retention, confirmation | Consumer-owned |
 | Host modes | Tropos | Nothing; Zetesis never selects a host or switches GPU modes | Not applicable | Outside Zetesis |
 | Tool federation | Kanon registration plus the consumer agent runtime | A library API | Any tool surface as a registered surface declaration with a pinned manifest | No Zetesis tool surface exists |
@@ -405,14 +405,14 @@ external standards.
 
 | Operation | Dimension | Unit | Ceiling source | Status |
 |-----------|-----------|------|----------------|--------|
-| Acquisition | Redirects | count | 20 (Fetch standard redirect limit) | Planned (Phase 01 S1) |
-| Acquisition | Connect timeout | duration per attempt | Caller-supplied; no crate ceiling has a landed or external source | Planned (Phase 01 S1) |
-| Acquisition | Whole-operation deadline | duration | Caller-supplied; no crate ceiling has a landed or external source | Planned (Phase 01 S1) |
-| Acquisition | Header bytes | bytes | HTTP client buffer bound (`hyper` `max_buf_size`) | Planned (Phase 01 S1) |
-| Acquisition | Wire bytes | bytes | 10 MiB (`PageContent::MAX_BODY_BYTES`, `constraints.rs:400`) | Planned (Phase 01 S1) |
+| Acquisition | Redirects | count | 20 (Fetch standard redirect limit) | Implemented (Phase 01 S1) |
+| Acquisition | Connect timeout | duration per attempt | Caller-supplied; no crate ceiling has a landed or external source | Implemented (Phase 01 S1) |
+| Acquisition | Whole-operation deadline | duration | Caller-supplied; no crate ceiling has a landed or external source | Implemented (Phase 01 S1) |
+| Acquisition | Header bytes | bytes | 417,792 (`AcquisitionLimits::MAX_HEADER_BYTES_CEILING`, hyper's default read-buffer ceiling); floor 8,192 (`hyper` `max_buf_size` minimum) | Implemented (Phase 01 S1) |
+| Acquisition | Wire bytes | bytes | 10 MiB (`AcquisitionLimits::MAX_BODY_BYTES_CEILING`, carried from the retired `PageContent::MAX_BODY_BYTES`) | Implemented (Phase 01 S1) |
 | Acquisition | Decoded bytes | bytes | 10 MiB (same source) | Planned (Phase 01 S2) |
-| Acquisition | Text bytes | bytes | 4 MiB (`PageContent::MAX_TEXT_BYTES`, `constraints.rs:403`) | Planned (Phase 01 S2) |
-| Acquisition | URL bytes | bytes | 8 KiB (`PageContent::MAX_URL_BYTES`, `constraints.rs:391`) | Planned (Phase 01 S1) |
+| Acquisition | Text bytes | bytes | 4 MiB (`AcquisitionLimits::MAX_TEXT_BYTES_CEILING`, carried from the retired `PageContent::MAX_TEXT_BYTES`) | Planned (Phase 01 S2) |
+| Acquisition | URL bytes | bytes | 8 KiB (`AcquisitionLimits::MAX_URL_BYTES_CEILING`, carried from the retired `PageContent::MAX_URL_BYTES`) | Implemented (Phase 01 S1) |
 | Provider search | Requests | count (`ProviderSpend::request_count`, `u32`) | Provider quota | Recorded per call; not enforced |
 | Provider search | Free-tier units | provider-defined (`ProviderSpend::free_tier_units`, `u64`) | Provider quota | Recorded per call; not enforced |
 | Provider search | Paid spend | micro-units of USD as landed (`u64`, 1 USD = 10,000,000, `cost.rs:88-91`) | Configured caps | Checked in memory; authority planned (zetesis#47) |
@@ -422,7 +422,7 @@ external standards.
 
 | Operation | Rule | Status |
 |-----------|------|--------|
-| Static acquisition | Dropping the `acquire` future cancels all work for that call; no background task survives; no envelope is produced. Deadline expiry is not cancellation: it yields `failed { deadline_exceeded }` with evidence. The consumer settles or releases its own reservation. | Planned (Phase 01 S1) |
+| Static acquisition | Dropping the `acquire` future cancels all work for that call; no background task survives; no envelope is produced. Deadline expiry is not cancellation: it yields `failed { deadline_exceeded }` with evidence. The consumer settles or releases its own reservation. | Implemented (Phase 01 S1); the envelope arrives in Phase 01 S2 |
 | Provider search | Dropping `search` must not leak partial results or unrecorded spend (`provider.rs:44-50`). Once attempt identity exists, a drop after the request was sent is an unknown outcome; the ledger records it as unknown and a retry reuses the attempt identity. | Convention only; attempt identity planned |
 | Deep research, future | Dropping `submit` or `poll` is safe; dropping `fetch` is safe unless the backend deletes on retrieval (`deep.rs:44-51`). | Convention only |
 | Deep research, task | `cancel` is idempotent for pending, running, and cancelled tasks and refuses ready or failed tasks (`deep.rs:37-42`). `LocalDeepResearch::cancel_task` implements this; a cancelled task's in-flight offline result is discarded (`local_deep_research.rs:215-227`). | Implemented in `LocalDeepResearch` only |
@@ -448,8 +448,10 @@ Rules for new variants and kinds:
 - A consumer egress refusal is permanent. At the baseline, `check_url_with`
   maps every resolver error to transient `TransientIo`
   (`net_policy.rs:164-169`), so a refusal expressed through a `Resolver`
-  wrapper currently classifies as transient. Phase 01 S1 must give the
-  resolver a way to signal refusal distinctly from lookup failure.
+  wrapper currently classifies as transient. Phase 01 S1 gives the
+  resolver that signal: an error of kind `PermissionDenied` is
+  `egress_denied` in `StaticAcquirer` and a permanent `UnsafeTarget` from
+  `check_url_with`.
 - `Partial` outcomes are not errors and have no class.
 
 ## 12. Storage, credentials, and egress
