@@ -49,8 +49,9 @@
 //! | 400, 414, 422 | [`Error::InvalidQuery`] |
 //! | 401, 403 | [`Error::Unauthorized`] |
 //! | 429 | [`Error::RateLimited`], with `Retry-After` in milliseconds when present |
+//! | 503 with a readable `Retry-After` | [`Error::RateLimited`] with that delay |
 //! | any other 4xx | [`Error::PermanentIo`] |
-//! | 5xx, and any other status | [`Error::ProviderFailure`] |
+//! | any other 5xx, and any other status | [`Error::ProviderFailure`] |
 //!
 //! The status decides: a result-shaped body under an error status is still
 //! the error. Error messages name the status and the defect and never quote
@@ -101,6 +102,7 @@ mod fixture;
 mod freshness;
 mod local_deep_research;
 mod net_policy;
+mod pacing;
 mod provider;
 mod providers;
 mod query;

@@ -81,13 +81,12 @@ const STATUS_FORBIDDEN: u16 = 403;
 const STATUS_URI_TOO_LONG: u16 = 414;
 const STATUS_UNPROCESSABLE: u16 = 422;
 const STATUS_TOO_MANY_REQUESTS: u16 = 429;
+const STATUS_SERVICE_UNAVAILABLE: u16 = 503;
 const CLIENT_ERRORS: std::ops::RangeInclusive<u16> = 400..=499;
 
 /// Longest parser-error detail carried into an error message, in
 /// characters.
 const MAX_DETAIL_CHARS: usize = 200;
-
-const MILLIS_PER_SECOND: u64 = 1_000;
 
 /// Documented upstream policy for one provider endpoint.
 ///
@@ -128,6 +127,24 @@ pub struct EndpointPolicy {
     /// Language scope of the endpoint as used here, and whether the
     /// request builder applies [`SearchConstraints::language`].
     pub language_scope: &'static str,
+}
+
+impl EndpointPolicy {
+    /// Minimum spacing between requests that keeps within the documented
+    /// per-client rate (`window / requests`); `None` when the provider
+    /// documents no per-client rate, which leaves the interval to the
+    /// caller.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the transport wiring builds each provider's pacer from this interval"
+        )
+    )]
+    pub(crate) fn min_interval(&self) -> Option<Duration> {
+        let limit = self.rate_limit?;
+        limit.window.checked_div(limit.requests)
+    }
 }
 
 /// A documented per-client request ceiling: at most `requests` requests in
@@ -277,6 +294,17 @@ pub(crate) fn check_status(
             retry_after_ms: retry_after_ms(headers, accessed_at),
         }
         .build(),
+        // WHY: a 503 that carries `Retry-After` names how long the service
+        // expects to be unavailable (RFC 9110 section 10.2.3), and Wikimedia
+        // documents 503 with `Retry-After` as a rate-limit answer; either way
+        // the caller must hold off that long before asking again.
+        STATUS_SERVICE_UNAVAILABLE if retry_after_ms(headers, accessed_at).is_some() => {
+            RateLimitedSnafu {
+                provider,
+                retry_after_ms: retry_after_ms(headers, accessed_at),
+            }
+            .build()
+        }
         STATUS_UNAUTHORIZED | STATUS_FORBIDDEN => UnauthorizedSnafu {
             provider,
             message: format!("HTTP {status}"),
@@ -353,22 +381,12 @@ fn header<'h>(headers: &[(&str, &'h str)], name: &str) -> Option<&'h str> {
         .map(|(_, v)| *v)
 }
 
-/// `Retry-After` as milliseconds from `accessed_at`: delta-seconds, or an
-/// IMF-fixdate HTTP-date. `None` when absent or unparseable, which tells
-/// the caller to back off on its own schedule.
-///
-/// NOTE: the two obsolete HTTP-date forms (RFC 850 and asctime) are not
-/// recognized; they read as absent.
+/// `Retry-After` as milliseconds from `accessed_at`, in any form
+/// [`crate::pacing::retry_after`] reads. `None` when absent or unparseable,
+/// which tells the caller to back off on its own schedule.
 fn retry_after_ms(headers: &[(&str, &str)], accessed_at: Timestamp) -> Option<u64> {
-    let value = header(headers, "retry-after")?.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(seconds.saturating_mul(MILLIS_PER_SECOND));
-    }
-    let at = jiff::fmt::rfc2822::DateTimeParser::new()
-        .parse_timestamp(value)
-        .ok()?;
-    let wait = accessed_at.duration_until(at);
-    Some(u64::try_from(wait.as_millis()).unwrap_or(0))
+    let delay = crate::pacing::retry_after(header(headers, "retry-after")?, accessed_at)?;
+    Some(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Trim and collapse every whitespace run to one space.
@@ -455,6 +473,25 @@ mod tests {
     }
 
     #[test]
+    fn min_interval_follows_each_documented_rate() {
+        assert_eq!(
+            Arxiv::POLICY.min_interval(),
+            Some(Duration::from_secs(3)),
+            "arXiv: one request every three seconds"
+        );
+        assert_eq!(
+            Wikipedia::POLICY.min_interval(),
+            Some(Duration::from_millis(300)),
+            "Wikipedia: 200 requests per minute"
+        );
+        assert_eq!(
+            SemanticScholar::POLICY.min_interval(),
+            None,
+            "Semantic Scholar documents no per-client rate for unauthenticated use"
+        );
+    }
+
+    #[test]
     fn rank_confidence_is_reciprocal_rank() {
         assert!((rank_confidence(0) - 1.0).abs() < f32::EPSILON, "rank 1");
         assert!((rank_confidence(1) - 0.5).abs() < f32::EPSILON, "rank 2");
@@ -483,6 +520,39 @@ mod tests {
             retry_after_ms(&[("retry-after", "Fri, 25 Sep 2026 17:59:00 GMT")], at),
             Some(0),
             "a date already past means retry now"
+        );
+    }
+
+    #[test]
+    fn retry_after_accepts_the_obsolete_date_forms() {
+        let at = ts("2026-09-25T18:00:00Z");
+        for value in ["Friday, 25-Sep-26 18:00:10 GMT", "Fri Sep 25 18:00:10 2026"] {
+            assert_eq!(
+                retry_after_ms(&[("retry-after", value)], at),
+                Some(10_000),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_unavailable_with_retry_after_is_rate_limited() {
+        let at = ts("2026-09-25T18:00:00Z");
+        let err = check_status("p", 503, &[("Retry-After", "7")], at).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::RateLimited {
+                    retry_after_ms: Some(7_000),
+                    ..
+                }
+            ),
+            "503 with Retry-After asks the caller to hold off: {err:?}"
+        );
+        let err = check_status("p", 503, &[("Retry-After", "later")], at).unwrap_err();
+        assert!(
+            matches!(err, Error::ProviderFailure { .. }),
+            "503 with an unreadable Retry-After is a plain failure: {err:?}"
         );
     }
 

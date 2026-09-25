@@ -380,9 +380,9 @@ pub enum EvidenceState {
     /// it had no hits, or every hit was dropped by the caller's screens or
     /// as a malformed record.
     NoEvidence,
-    /// No provider is recorded as having answered: every attempt failed or
-    /// was refused, or the result carries no attempt receipt. This is not
-    /// evidence of absence.
+    /// No provider is recorded as having answered: every attempt failed,
+    /// timed out, or was refused, or the result carries no attempt receipt.
+    /// This is not evidence of absence.
     Unanswered,
 }
 
@@ -510,6 +510,12 @@ pub enum AttemptOutcome {
         class: ErrorClass,
         /// Rendered error message.
         message: String,
+    },
+    /// The call did not finish within the router's per-attempt timeout
+    /// and was cancelled; its answer, if any, was never seen.
+    TimedOut {
+        /// The per-attempt timeout that elapsed, in milliseconds.
+        timeout_ms: u64,
     },
     /// The router did not call the provider.
     Refused {
@@ -853,6 +859,23 @@ mod tests {
                 }
             }),
             "an attempt receipt omits the absent citation and tags its outcome"
+        );
+    }
+
+    #[test]
+    fn timed_out_receipt_has_a_stable_wire_shape() {
+        let entry = ProvenanceEntry::attempt(
+            "arxiv",
+            ProviderAttempt {
+                ordinal: 1,
+                tier: ProviderTier::Tier0Free,
+                outcome: AttemptOutcome::TimedOut { timeout_ms: 5_000 },
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap()["attempt"]["outcome"],
+            serde_json::json!({"status": "timed_out", "timeout_ms": 5_000}),
+            "a timeout is its own outcome, not a dropped attempt"
         );
     }
 

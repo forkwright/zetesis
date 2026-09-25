@@ -261,10 +261,44 @@ fn generic_user_agent_denial_is_unauthorized() {
 
 #[test]
 fn server_error_is_a_transient_provider_failure() {
-    let err = Wikipedia::parse(503, &[("retry-after", "5")], b"", accessed()).unwrap_err();
+    let err = Wikipedia::parse(503, &[], b"", accessed()).unwrap_err();
     assert!(
         matches!(err, Error::ProviderFailure { .. }) && err.is_transient(),
-        "503: {err:?}"
+        "503 without Retry-After: {err:?}"
+    );
+}
+
+#[test]
+fn service_unavailable_with_retry_after_is_rate_limited() {
+    // NOTE: Wikimedia documents 429 and 503 with Retry-After as its
+    // rate-limit answers.
+    let err = Wikipedia::parse(503, &[("retry-after", "5")], b"", accessed()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::RateLimited {
+                retry_after_ms: Some(5_000),
+                ..
+            }
+        ),
+        "503 with Retry-After asks the caller to hold off five seconds: {err:?}"
+    );
+    let err = Wikipedia::parse(
+        503,
+        &[("Retry-After", "Friday, 25-Sep-26 18:00:32 GMT")],
+        b"",
+        accessed(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::RateLimited {
+                retry_after_ms: Some(30_000),
+                ..
+            }
+        ),
+        "an rfc850-date Retry-After is read too: {err:?}"
     );
 }
 

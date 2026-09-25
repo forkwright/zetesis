@@ -115,7 +115,7 @@ mod tests {
             "evidence state is reachable through the facade"
         );
 
-        let router = Router::new(Vec::new()).unwrap();
+        let router = Router::new(Vec::new(), std::time::Duration::from_secs(30)).unwrap();
         assert!(
             format!("{router:?}").contains("Router"),
             "the router is reachable and debuggable"

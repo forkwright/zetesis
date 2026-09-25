@@ -51,9 +51,12 @@ elenkhos = { version = "0.0.6", path = "crates/elenkhos" }
 sylloge = { version = "0.0.6", path = "crates/sylloge" }
 synopsis = { version = "0.0.6", path = "crates/synopsis" }
 
+# WHY: the router bounds each provider attempt and paces requests on the
+# tokio clock, so library code needs only `sync` and `time`; runtime and
+# test features are added where tests need them.
 [workspace.dependencies.tokio]
 version = "1"
-features = ["rt-multi-thread", "macros", "sync", "time"]
+features = ["sync", "time"]
 
 [profile.dev.package."*"]
 opt-level = 2

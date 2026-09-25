@@ -43,6 +43,9 @@ const ALL_SHAPES: [QueryShape; 10] = [
     QueryShape::DatasetDiscovery,
 ];
 
+/// Generous enough that no un-delayed stub comes near it.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn now() -> Timestamp {
     "2026-09-25T18:00:00Z".parse().unwrap()
 }
@@ -157,7 +160,7 @@ fn cohort(wikipedia: Reply, s2: Reply, arxiv: Reply) -> (Router, [Arc<Stub>; 3])
         .iter()
         .map(|stub| Arc::clone(stub) as Arc<dyn Provider>)
         .collect();
-    (Router::new(providers).unwrap(), stubs)
+    (Router::new(providers, ATTEMPT_TIMEOUT).unwrap(), stubs)
 }
 
 fn router_of(stubs: &[Arc<Stub>]) -> Router {
@@ -166,6 +169,7 @@ fn router_of(stubs: &[Arc<Stub>]) -> Router {
             .iter()
             .map(|stub| Arc::clone(stub) as Arc<dyn Provider>)
             .collect(),
+        ATTEMPT_TIMEOUT,
     )
     .unwrap()
 }
@@ -1146,7 +1150,7 @@ async fn cache_key_is_stable_and_sensitive_to_every_input() {
 fn duplicate_provider_names_are_refused() {
     let a: Arc<dyn Provider> = Stub::new("arxiv", &[], empty());
     let b: Arc<dyn Provider> = Stub::new("arxiv", &[], empty());
-    let err = Router::new(vec![a, b]).unwrap_err();
+    let err = Router::new(vec![a, b], ATTEMPT_TIMEOUT).unwrap_err();
     assert!(
         matches!(err, Error::InvalidConstraint { ref field, .. } if field == "providers"),
         "receipts keyed by name would be ambiguous: {err:?}"
@@ -1167,6 +1171,7 @@ fn router_search_future_is_send() {
 #[test]
 fn provenance_receipts_round_trip_through_json() {
     let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .unwrap();
     let (router, _) = cohort(
@@ -1184,5 +1189,319 @@ fn provenance_receipts_round_trip_through_json() {
     assert_eq!(
         back, result,
         "a routed result, receipts included, round-trips"
+    );
+}
+
+/// One scripted answer: wait `delay` on the tokio clock, then reply.
+struct Step {
+    delay: Duration,
+    reply: Reply,
+}
+
+fn step(delay_secs: u64, reply: Reply) -> Step {
+    Step {
+        delay: Duration::from_secs(delay_secs),
+        reply,
+    }
+}
+
+/// A provider that plays one scripted step per call, then answers empty.
+struct Scripted {
+    name: &'static str,
+    shapes: &'static [QueryShape],
+    steps: std::sync::Mutex<std::collections::VecDeque<Step>>,
+    calls: AtomicUsize,
+}
+
+impl Scripted {
+    fn new(name: &'static str, shapes: &'static [QueryShape], steps: Vec<Step>) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            shapes,
+            steps: std::sync::Mutex::new(steps.into()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Provider for Scripted {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn tier(&self) -> ProviderTier {
+        ProviderTier::Tier0Free
+    }
+
+    fn query_shapes(&self) -> &[QueryShape] {
+        self.shapes
+    }
+
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        _constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, Result<ResearchResult>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let next = self.steps.lock().unwrap().pop_front();
+            let Some(Step { delay, reply }) = next else {
+                return Ok(ResearchResult::empty(
+                    query,
+                    QueryShape::GeneralResearch,
+                    "stub",
+                ));
+            };
+            tokio::time::sleep(delay).await;
+            match reply {
+                Reply::Hits(hits) | Reply::Parsed(hits, _) => Ok(ResearchResult::new(
+                    query,
+                    QueryShape::GeneralResearch,
+                    hits,
+                    Vec::new(),
+                    CostTracking::default(),
+                    "stub",
+                )),
+                Reply::Fail(make) => Err(make()),
+            }
+        })
+    }
+}
+
+fn scripted_router(providers: &[Arc<Scripted>], timeout: Duration) -> Router {
+    Router::new(
+        providers
+            .iter()
+            .map(|p| Arc::clone(p) as Arc<dyn Provider>)
+            .collect(),
+        timeout,
+    )
+    .unwrap()
+}
+
+/// A 429 asking the caller to hold off five seconds.
+fn rate_limited_for_5s() -> Reply {
+    Reply::Fail(|| {
+        RateLimitedSnafu {
+            provider: "semantic_scholar",
+            retry_after_ms: Some(5_000_u64),
+        }
+        .build()
+    })
+}
+
+/// A 429 asking the caller to hold off a minute.
+fn rate_limited_for_60s() -> Reply {
+    Reply::Fail(|| {
+        RateLimitedSnafu {
+            provider: "semantic_scholar",
+            retry_after_ms: Some(60_000_u64),
+        }
+        .build()
+    })
+}
+
+const DISCOVERY: &[QueryShape] = &[QueryShape::SemanticDiscovery];
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_after_holds_the_next_attempt_to_that_provider() {
+    let provider = Scripted::new(
+        "semantic_scholar",
+        DISCOVERY,
+        vec![
+            step(0, rate_limited_for_5s()),
+            step(
+                0,
+                Reply::Hits(vec![web_hit("After the hold", "https://example.org/a")]),
+            ),
+        ],
+    );
+    let router = scripted_router(&[Arc::clone(&provider)], ATTEMPT_TIMEOUT);
+    let first = search(
+        &router,
+        QueryShape::SemanticDiscovery,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome(&first, "semantic_scholar"),
+            AttemptOutcome::Failed {
+                class: ErrorClass::Transient,
+                ..
+            }
+        ),
+        "the 429 is receipted"
+    );
+
+    let start = tokio::time::Instant::now();
+    let second = search(
+        &router,
+        QueryShape::SemanticDiscovery,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(5),
+        "the next attempt waits out the Retry-After"
+    );
+    assert_eq!(titles(&second), ["After the hold"], "then it is answered");
+    assert_eq!(provider.calls(), 2, "one call per attempt");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_503_retry_after_holds_the_next_attempt_to_that_provider() {
+    let provider = Scripted::new(
+        "wikipedia",
+        &[QueryShape::QuickFactual],
+        vec![step(
+            0,
+            Reply::Fail(|| Wikipedia::parse(503, &[("retry-after", "7")], b"", now()).unwrap_err()),
+        )],
+    );
+    let router = scripted_router(&[provider], ATTEMPT_TIMEOUT);
+    search(
+        &router,
+        QueryShape::QuickFactual,
+        &SearchConstraints::default(),
+    )
+    .await;
+    let start = tokio::time::Instant::now();
+    let second = search(
+        &router,
+        QueryShape::QuickFactual,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(7),
+        "a 503 with Retry-After holds the provider like a 429"
+    );
+    assert_eq!(
+        outcome(&second, "wikipedia"),
+        AttemptOutcome::Empty,
+        "then it answers"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_past_the_deadline_fails_the_attempt_as_rate_limited_without_waiting() {
+    let provider = Scripted::new(
+        "semantic_scholar",
+        DISCOVERY,
+        vec![
+            step(0, rate_limited_for_60s()),
+            step(
+                0,
+                Reply::Hits(vec![web_hit("Never asked", "https://example.org/b")]),
+            ),
+        ],
+    );
+    let router = scripted_router(&[Arc::clone(&provider)], Duration::from_secs(10));
+    search(
+        &router,
+        QueryShape::SemanticDiscovery,
+        &SearchConstraints::default(),
+    )
+    .await;
+
+    let start = tokio::time::Instant::now();
+    let second = search(
+        &router,
+        QueryShape::SemanticDiscovery,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::ZERO,
+        "no sleep past the deadline"
+    );
+    assert_eq!(provider.calls(), 1, "the provider is not called again");
+    assert!(
+        matches!(
+            outcome(&second, "semantic_scholar"),
+            AttemptOutcome::Failed { class: ErrorClass::Transient, ref message }
+                if message.contains("rate limited") && message.contains("60000")
+        ),
+        "the attempt fails as rate-limited, naming the remaining hold"
+    );
+    assert!(
+        second.cost_spent.by_provider.is_empty(),
+        "an attempt that never called costs nothing"
+    );
+    assert_eq!(second.evidence_state(), EvidenceState::Unanswered);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_attempt_past_its_timeout_is_receipted_as_timed_out() {
+    let slow = Scripted::new(
+        "semantic_scholar",
+        &[QueryShape::AcademicLiterature],
+        vec![step(
+            60,
+            Reply::Hits(vec![web_hit("Too late", "https://example.org/c")]),
+        )],
+    );
+    let prompt = Scripted::new(
+        "arxiv",
+        &[QueryShape::AcademicLiterature],
+        vec![step(
+            1,
+            Reply::Hits(vec![web_hit("In time", "https://example.org/d")]),
+        )],
+    );
+    let router = scripted_router(&[slow, prompt], Duration::from_secs(5));
+    let start = tokio::time::Instant::now();
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+
+    assert_eq!(
+        outcome(&result, "semantic_scholar"),
+        AttemptOutcome::TimedOut { timeout_ms: 5_000 },
+        "the slow call is cancelled at its deadline and receipted, not dropped"
+    );
+    assert_eq!(
+        outcome(&result, "arxiv"),
+        answered(1),
+        "the next provider still runs"
+    );
+    assert_eq!(
+        titles(&result),
+        ["In time"],
+        "the late answer is never seen"
+    );
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(6),
+        "five seconds for the timed-out attempt, one for the next"
+    );
+    assert_eq!(
+        result
+            .cost_spent
+            .by_provider
+            .get("semantic_scholar")
+            .map(|l| l.request_count),
+        Some(1),
+        "the timed-out call was made, so it is counted"
+    );
+}
+
+#[test]
+fn a_zero_attempt_timeout_is_refused() {
+    let err = Router::new(Vec::new(), Duration::ZERO).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidConstraint { ref field, .. } if field == "attempt_timeout"),
+        "an attempt must be allowed some time: {err:?}"
     );
 }

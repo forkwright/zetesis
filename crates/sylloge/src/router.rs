@@ -3,17 +3,22 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use jiff::Timestamp;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use snafu::ensure;
+use tokio::time::Instant;
 use url::Url;
 
 use crate::constraints::{DomainRule, SearchConstraints};
 use crate::cost::{CostTracking, ProviderSpend};
-use crate::error::{InvalidConstraintSnafu, InvalidQuerySnafu, Result, UnsupportedSnafu};
+use crate::error::{
+    Error, InvalidConstraintSnafu, InvalidQuerySnafu, RateLimitedSnafu, Result, UnsupportedSnafu,
+};
 use crate::net_policy::parse_domain_rules;
+use crate::pacing::Pacer;
 use crate::provider::Provider;
 use crate::providers::{
     DoiIdentity, META_ARXIV_DOI, META_ARXIV_ID, META_DOI, META_PAGEID, META_S2_PAPER_ID, META_YEAR,
@@ -62,10 +67,19 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// [`ResearchResult::provenance`] ([`ProvenanceEntry::attempt`]): answered
 /// (with how many hits were dropped and why, and how many malformed
 /// records the provider dropped), empty, failed (with the error's class),
-/// or refused. [`ResearchResult::malformed_records`] sums the malformed
-/// counts, and [`ResearchResult::evidence_state`] reads the receipts to tell
-/// "nothing found" from "nobody answered". A transient or permanent failure of one
-/// provider does not stop the others; only a fatal error aborts the route.
+/// timed out, or refused. [`ResearchResult::malformed_records`] sums the
+/// malformed counts, and [`ResearchResult::evidence_state`] reads the
+/// receipts to tell "nothing found" from "nobody answered". A transient or
+/// permanent failure of one provider does not stop the others; only a
+/// fatal error aborts the route.
+///
+/// Each attempt has the router's per-attempt timeout as its deadline. The
+/// attempt first waits for the provider's pacing slot: a provider that
+/// answered with `Retry-After` (a 429, or a 503 carrying one) is not asked
+/// again until that delay has passed. A slot that opens after the deadline
+/// fails the attempt as rate-limited at once, without waiting and without
+/// calling the provider. A call still running at the deadline is cancelled
+/// and receipted as timed out.
 /// A paid-tier provider is refused unconditionally, whatever the caller's
 /// [`crate::BudgetConstraint`] says: paid spend needs a durable ledger
 /// that can reserve and settle per attempt, which does not exist yet, and
@@ -111,7 +125,14 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// The key covers only what the router is given; it is not the full query
 /// identity, which also carries consumer and scope identifiers.
 pub struct Router {
-    providers: Vec<Arc<dyn Provider>>,
+    providers: Vec<Registered>,
+    attempt_timeout: Duration,
+}
+
+/// A registered provider and the pacer its attempts wait on.
+struct Registered {
+    provider: Arc<dyn Provider>,
+    pacer: Pacer,
 }
 
 impl fmt::Debug for Router {
@@ -119,22 +140,36 @@ impl fmt::Debug for Router {
         f.debug_struct("Router")
             .field(
                 "providers",
-                &self.providers.iter().map(|p| p.name()).collect::<Vec<_>>(),
+                &self
+                    .providers
+                    .iter()
+                    .map(|entry| entry.provider.name())
+                    .collect::<Vec<_>>(),
             )
+            .field("attempt_timeout", &self.attempt_timeout)
             .finish()
     }
 }
 
 impl Router {
-    /// Register `providers`; their order is the order every route tries
-    /// them in.
+    /// Register `providers`, whose order is the order every route tries
+    /// them in, with `attempt_timeout` bounding each provider attempt,
+    /// pacing wait included.
     ///
     /// # Errors
     ///
-    /// [`crate::Error::InvalidConstraint`] (field `providers`) when two
-    /// providers share a name: receipts and cost lines are keyed by name,
-    /// so they would be indistinguishable.
-    pub fn new(providers: Vec<Arc<dyn Provider>>) -> Result<Self> {
+    /// [`crate::Error::InvalidConstraint`] with field `providers` when two
+    /// providers share a name (receipts and cost lines are keyed by name,
+    /// so they would be indistinguishable), and with field
+    /// `attempt_timeout` when it is zero.
+    pub fn new(providers: Vec<Arc<dyn Provider>>, attempt_timeout: Duration) -> Result<Self> {
+        ensure!(
+            !attempt_timeout.is_zero(),
+            InvalidConstraintSnafu {
+                field: "attempt_timeout",
+                reason: "must be greater than zero",
+            }
+        );
         let mut names = BTreeSet::new();
         for provider in &providers {
             ensure!(
@@ -145,7 +180,21 @@ impl Router {
                 }
             );
         }
-        Ok(Self { providers })
+        // NOTE: a provider's documented request interval is not visible
+        // through `dyn Provider` yet, so pacers start with none and pace by
+        // `Retry-After` alone; the transport wiring supplies each
+        // provider's interval from its endpoint policy.
+        let providers = providers
+            .into_iter()
+            .map(|provider| Registered {
+                provider,
+                pacer: Pacer::new(Duration::ZERO),
+            })
+            .collect();
+        Ok(Self {
+            providers,
+            attempt_timeout,
+        })
     }
 
     /// Route `query` of `shape` under `constraints`, evaluating freshness
@@ -185,50 +234,88 @@ impl Router {
         let cache_key = cache_key(&normalized, shape, &screen.canonical_constraints())?;
 
         let mut provenance = Vec::with_capacity(route.len());
-        let mut cost = CostTracking::default();
-        let mut malformed_records = 0_usize;
-        let mut candidates = Vec::new();
-        for (index, provider) in route.into_iter().enumerate() {
-            let tier = provider.tier();
-            let outcome = if tier.is_paid() {
-                AttemptOutcome::Refused {
-                    reason: RefusalReason::PaidRoutingUnavailable,
-                }
-            } else {
-                cost.add(ProviderSpend::new(provider.name(), 0, 1, 1));
-                match provider.search(query, constraints).await {
-                    Ok(result) => {
-                        malformed_records =
-                            malformed_records.saturating_add(result.malformed_records);
-                        screen.admit(provider.name(), result, &mut candidates)
-                    }
-                    Err(e) if e.is_fatal() => return Err(e),
-                    Err(e) => AttemptOutcome::Failed {
-                        class: e.class(),
-                        message: e.to_string(),
-                    },
-                }
-            };
+        let mut collected = Collected::default();
+        for (index, entry) in route.into_iter().enumerate() {
+            let outcome = self
+                .attempt(entry, query, constraints, &screen, &mut collected)
+                .await?;
             let attempt = ProviderAttempt {
                 ordinal: u32::try_from(index).unwrap_or(u32::MAX),
-                tier,
+                tier: entry.provider.tier(),
                 outcome,
             };
-            provenance.push(ProvenanceEntry::attempt(provider.name(), attempt));
+            provenance.push(ProvenanceEntry::attempt(entry.provider.name(), attempt));
         }
 
-        let hits = merge(candidates, constraints.max_results);
-        let mut result = ResearchResult::new(query, shape, hits, provenance, cost, cache_key);
-        result.malformed_records = malformed_records;
+        let hits = merge(collected.candidates, constraints.max_results);
+        let mut result =
+            ResearchResult::new(query, shape, hits, provenance, collected.cost, cache_key);
+        result.malformed_records = collected.malformed_records;
         Ok(result)
     }
 
+    /// One provider attempt, bounded by the per-attempt timeout.
+    async fn attempt(
+        &self,
+        entry: &Registered,
+        query: &str,
+        constraints: &SearchConstraints,
+        screen: &Screen<'_>,
+        collected: &mut Collected,
+    ) -> Result<AttemptOutcome> {
+        let provider = &entry.provider;
+        if provider.tier().is_paid() {
+            return Ok(AttemptOutcome::Refused {
+                reason: RefusalReason::PaidRoutingUnavailable,
+            });
+        }
+        let started = Instant::now();
+        let deadline = started.checked_add(self.attempt_timeout).unwrap_or(started);
+        if let Err(slot) = entry.pacer.claim(deadline).await {
+            let error = RateLimitedSnafu {
+                provider: provider.name(),
+                retry_after_ms: Some(millis(slot.opens_in)),
+            }
+            .build();
+            return Ok(failed(&error));
+        }
+        collected
+            .cost
+            .add(ProviderSpend::new(provider.name(), 0, 1, 1));
+        let Ok(answer) =
+            tokio::time::timeout_at(deadline, provider.search(query, constraints)).await
+        else {
+            return Ok(AttemptOutcome::TimedOut {
+                timeout_ms: millis(self.attempt_timeout),
+            });
+        };
+        match answer {
+            Ok(result) => {
+                collected.malformed_records = collected
+                    .malformed_records
+                    .saturating_add(result.malformed_records);
+                Ok(screen.admit(provider.name(), result, &mut collected.candidates))
+            }
+            Err(e) if e.is_fatal() => Err(e),
+            Err(e) => {
+                if let Error::RateLimited {
+                    retry_after_ms: Some(delay),
+                    ..
+                } = e
+                {
+                    entry.pacer.hold_for(Duration::from_millis(delay)).await;
+                }
+                Ok(failed(&e))
+            }
+        }
+    }
+
     /// Registered providers that declare `shape`, in registration order.
-    fn route(&self, shape: QueryShape) -> Result<Vec<&Arc<dyn Provider>>> {
-        let route: Vec<&Arc<dyn Provider>> = self
+    fn route(&self, shape: QueryShape) -> Result<Vec<&Registered>> {
+        let route: Vec<&Registered> = self
             .providers
             .iter()
-            .filter(|p| p.query_shapes().contains(&shape))
+            .filter(|entry| entry.provider.query_shapes().contains(&shape))
             .collect();
         ensure!(
             !route.is_empty(),
@@ -241,6 +328,27 @@ impl Router {
         );
         Ok(route)
     }
+}
+
+/// What the route's attempts gathered.
+#[derive(Default)]
+struct Collected {
+    cost: CostTracking,
+    malformed_records: usize,
+    candidates: Vec<Candidate>,
+}
+
+/// The receipt for an attempt that ended in a non-fatal error.
+fn failed(error: &Error) -> AttemptOutcome {
+    AttemptOutcome::Failed {
+        class: error.class(),
+        message: error.to_string(),
+    }
+}
+
+/// Whole milliseconds, saturating.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The caller's domain and freshness screens, parsed once per search.
