@@ -15,7 +15,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use url::Url;
 
 use sylloge::{
-    BudgetConstraint, CostTracking, Error, ResearchStatus, Resolver, SearchConstraints, SpendLedger,
+    AcquisitionFailure, AcquisitionLimits, BudgetConstraint, CostTracking, Error, HopRecord,
+    ResearchStatus, Resolver, SearchConstraints, SpendLedger,
 };
 
 /// Resolves every host to one fixed public-classified address, so these
@@ -270,5 +271,93 @@ fn result_hit_full_text_over_the_cap_is_rejected_at_decode() {
     assert!(
         serde_json::from_value::<sylloge::ResultHit>(value).is_err(),
         "a decoded full_text over the cap must be rejected"
+    );
+}
+
+// -- Static-acquisition records at the deserialization boundary. --
+
+fn limits_json() -> serde_json::Value {
+    serde_json::json!({
+        "schemes": "https_only",
+        "downgrade": "refuse",
+        "max_redirects": 5,
+        "connect_timeout_ms": 1000,
+        "deadline_ms": 10000,
+        "max_body_bytes": 1024,
+        "max_url_bytes": 2048,
+        "max_header_bytes": 8192,
+    })
+}
+
+#[test]
+fn acquisition_limits_consistent_record_decodes() {
+    let limits: AcquisitionLimits = serde_json::from_value(limits_json()).unwrap();
+    assert_eq!(limits.max_redirects(), 5, "control case decodes");
+}
+
+#[test]
+fn acquisition_limits_above_a_ceiling_are_rejected_at_decode() {
+    for (field, value, named) in [
+        ("max_redirects", serde_json::json!(21), "max_redirects"),
+        (
+            "max_body_bytes",
+            serde_json::json!(10 * 1024 * 1024 + 1),
+            "max_body_bytes",
+        ),
+        (
+            "max_url_bytes",
+            serde_json::json!(8 * 1024 + 1),
+            "max_url_bytes",
+        ),
+        (
+            "max_header_bytes",
+            serde_json::json!(4096),
+            "max_header_bytes",
+        ),
+        ("deadline_ms", serde_json::json!(0), "deadline"),
+    ] {
+        let mut record = limits_json();
+        record[field] = value;
+        let err = serde_json::from_value::<AcquisitionLimits>(record).unwrap_err();
+        assert!(
+            err.to_string().contains(named),
+            "{field}: a persisted profile outside the ceilings must not decode: {err}"
+        );
+    }
+}
+
+#[test]
+fn acquisition_limits_unknown_field_is_rejected() {
+    let mut record = limits_json();
+    record["allow_private"] = serde_json::json!(true);
+    assert!(
+        serde_json::from_value::<AcquisitionLimits>(record).is_err(),
+        "an unknown field must not be silently dropped from a transfer profile"
+    );
+}
+
+#[test]
+fn hop_record_unknown_field_is_rejected() {
+    let record = serde_json::json!({
+        "url": "https://public.example/",
+        "resolved": [],
+        "connect_attempts": [],
+        "tls": null,
+        "status": null,
+        "location": null,
+        "authorized_local": true,
+    });
+    assert!(
+        serde_json::from_value::<HopRecord>(record).is_err(),
+        "hop evidence with an unknown field belongs to another schema"
+    );
+}
+
+#[test]
+fn acquisition_failure_unknown_kind_is_rejected() {
+    let record = serde_json::json!({ "kind": "probably_fine" });
+    assert!(
+        serde_json::from_value::<AcquisitionFailure>(record).is_err(),
+        "an unknown failure kind must not decode as a known one"
     );
 }

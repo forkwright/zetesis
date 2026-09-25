@@ -4,13 +4,12 @@
 //! call. It captures caller intent that isn't already in the query string
 //! itself: budget ceiling, freshness window, allowed languages, domain
 //! allow/deny lists, and -- via [`SearchConstraints::check_url`] -- the
-//! fail-closed network-target policy every [`super::Crawler`]
-//! implementation must apply before fetching or following a redirect.
+//! fail-closed network-target policy [`super::StaticAcquirer`] applies to
+//! every hop before fetching it or following a redirect to it.
 //!
 //! [`DeepDepth`], [`ResearchStatus`], and [`TaskId`] are value types used
 //! by the [`super::DeepResearch`] trait for its asynchronous task
-//! lifecycle. [`PageContent`] is the normalized output of a single
-//! [`super::Crawler::fetch_page`] call.
+//! lifecycle.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -18,12 +17,11 @@ use std::time::Duration;
 use jiff::Timestamp;
 use language_tags::LanguageTag;
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::ensure;
-use url::{Host, Url};
+use url::Host;
 
 use crate::BudgetConstraint;
 use crate::citation::Citation;
-use crate::error::{InvalidConstraintSnafu, OversizedPayloadSnafu, Result};
+use crate::error::{InvalidConstraintSnafu, Result};
 use crate::freshness::{self, FreshnessBasis, FreshnessDecision, FreshnessPolicy};
 use crate::net_policy::canonical_ip;
 
@@ -409,210 +407,6 @@ where
     }
 }
 
-/// Output of a single [`super::Crawler::fetch_page`] call.
-///
-/// Fields are private so callers cannot mutate a checked value past its
-/// size bounds. Construction, extracted-text attachment, and deserialization
-/// all pass through the same validation path. Deserialization rejects an
-/// oversized value before returning `PageContent`; it is not a streaming
-/// decoder and therefore does not bound temporary allocations made by the
-/// selected `serde` format.
-///
-/// ```compile_fail
-/// # use sylloge::PageContent;
-/// fn replace_body(page: &mut PageContent) {
-///     page.body.clear();
-/// }
-/// ```
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[non_exhaustive]
-pub struct PageContent {
-    /// The URL that was actually fetched. May differ from the caller's
-    /// URL after redirect chains.
-    final_url: Url,
-
-    /// MIME content type of the returned payload (e.g. `text/html`,
-    /// `application/pdf`).
-    content_type: String,
-
-    /// Raw body bytes. Capped at [`PageContent::MAX_BODY_BYTES`] by
-    /// [`PageContent::new`].
-    body: Vec<u8>,
-
-    /// Extracted plain-text rendering of the body, if the crawler could
-    /// produce one. HTML extractors typically fill this; PDF pipelines
-    /// leave it `None` unless configured for OCR. Capped at
-    /// [`PageContent::MAX_TEXT_BYTES`] by
-    /// [`PageContent::with_extracted_text`].
-    extracted_text: Option<String>,
-
-    /// Timestamp the fetch completed.
-    fetched_at: Timestamp,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PageContentWire {
-    final_url: Url,
-    content_type: String,
-    body: Vec<u8>,
-    extracted_text: Option<String>,
-    fetched_at: Timestamp,
-}
-
-impl PageContent {
-    /// Maximum accepted serialized URL size in bytes.
-    pub const MAX_URL_BYTES: usize = 8 * 1024;
-
-    /// Maximum accepted MIME content-type size in bytes.
-    pub const MAX_CONTENT_TYPE_BYTES: usize = 1024;
-
-    /// Maximum accepted `body` size in bytes. Crawled pages come from
-    /// untrusted origins; anything beyond this cap is rejected before a
-    /// `PageContent` value is returned. The constructor receives an allocated
-    /// buffer and is not a streaming reader.
-    pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
-
-    /// Maximum accepted `extracted_text` size in bytes.
-    pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
-
-    /// Construct a page-content record. `extracted_text` starts `None`;
-    /// use [`PageContent::with_extracted_text`] to attach it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::Error::OversizedPayload`] when the URL, content type,
-    /// or body exceeds its corresponding `PageContent` limit.
-    pub fn new(
-        final_url: Url,
-        content_type: impl Into<String>,
-        body: Vec<u8>,
-        fetched_at: Timestamp,
-    ) -> Result<Self> {
-        let content_type = content_type.into();
-        ensure!(
-            final_url.as_str().len() <= Self::MAX_URL_BYTES,
-            OversizedPayloadSnafu {
-                what: "page URL",
-                len: final_url.as_str().len(),
-                max: Self::MAX_URL_BYTES,
-            }
-        );
-        ensure!(
-            content_type.len() <= Self::MAX_CONTENT_TYPE_BYTES,
-            OversizedPayloadSnafu {
-                what: "content type",
-                len: content_type.len(),
-                max: Self::MAX_CONTENT_TYPE_BYTES,
-            }
-        );
-        ensure!(
-            body.len() <= Self::MAX_BODY_BYTES,
-            OversizedPayloadSnafu {
-                what: "page body",
-                len: body.len(),
-                max: Self::MAX_BODY_BYTES,
-            }
-        );
-        Ok(Self {
-            final_url,
-            content_type,
-            body,
-            extracted_text: None,
-            fetched_at,
-        })
-    }
-
-    /// Builder: attach extracted plain-text.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::Error::OversizedPayload`] when `text` exceeds
-    /// [`PageContent::MAX_TEXT_BYTES`].
-    pub fn with_extracted_text(mut self, text: impl Into<String>) -> Result<Self> {
-        let text = text.into();
-        ensure!(
-            text.len() <= Self::MAX_TEXT_BYTES,
-            OversizedPayloadSnafu {
-                what: "extracted text",
-                len: text.len(),
-                max: Self::MAX_TEXT_BYTES,
-            }
-        );
-        self.extracted_text = Some(text);
-        Ok(self)
-    }
-
-    /// Whether the content type looks like HTML.
-    #[must_use]
-    pub fn is_html(&self) -> bool {
-        self.content_type.starts_with("text/html")
-    }
-
-    /// The URL that was fetched.
-    #[must_use]
-    pub const fn final_url(&self) -> &Url {
-        &self.final_url
-    }
-
-    /// The response MIME content type.
-    #[must_use]
-    pub fn content_type(&self) -> &str {
-        &self.content_type
-    }
-
-    /// The bounded raw response body.
-    #[must_use]
-    pub fn body(&self) -> &[u8] {
-        &self.body
-    }
-
-    /// The bounded extracted text, when an extractor produced one.
-    #[must_use]
-    pub fn extracted_text(&self) -> Option<&str> {
-        self.extracted_text.as_deref()
-    }
-
-    /// The timestamp at which the fetch completed.
-    #[must_use]
-    pub const fn fetched_at(&self) -> &Timestamp {
-        &self.fetched_at
-    }
-
-    /// Body size in bytes.
-    #[must_use]
-    pub fn body_len(&self) -> usize {
-        self.body.len()
-    }
-}
-
-impl TryFrom<PageContentWire> for PageContent {
-    type Error = crate::Error;
-
-    fn try_from(wire: PageContentWire) -> Result<Self> {
-        let page = Self::new(
-            wire.final_url,
-            wire.content_type,
-            wire.body,
-            wire.fetched_at,
-        )?;
-        match wire.extracted_text {
-            Some(text) => page.with_extracted_text(text),
-            None => Ok(page),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PageContent {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = PageContentWire::deserialize(deserializer)?;
-        Self::try_from(wire).map_err(serde::de::Error::custom)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,95 +674,6 @@ mod tests {
     }
 
     #[test]
-    fn page_content_is_html() {
-        let p = PageContent::new(
-            Url::parse("https://example.org/").unwrap(),
-            "text/html; charset=utf-8",
-            b"<html></html>".to_vec(),
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap()
-        .with_extracted_text("")
-        .unwrap();
-        assert!(p.is_html());
-        assert_eq!(p.body_len(), 13);
-        assert_eq!(p.body(), b"<html></html>");
-        assert_eq!(p.extracted_text(), Some(""));
-    }
-
-    #[test]
-    fn page_content_non_html() {
-        let p = PageContent::new(
-            Url::parse("https://example.org/a.pdf").unwrap(),
-            "application/pdf",
-            vec![0_u8; 100],
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap();
-        assert!(!p.is_html());
-        assert_eq!(p.body_len(), 100);
-        assert_eq!(p.content_type(), "application/pdf");
-        assert_eq!(p.extracted_text(), None);
-    }
-
-    #[test]
-    fn page_content_new_rejects_oversized_body() {
-        // WHY: provider payloads are untrusted; the cap is the defense
-        // against a hostile or broken origin exhausting memory.
-        let err = PageContent::new(
-            Url::parse("https://example.org/huge").unwrap(),
-            "text/html",
-            vec![0_u8; PageContent::MAX_BODY_BYTES + 1],
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap_err();
-        assert!(err.is_permanent());
-        assert!(err.to_string().contains("page body"));
-    }
-
-    #[test]
-    fn page_content_new_rejects_oversized_metadata() {
-        let oversized_url = Url::parse(&format!(
-            "https://example.org/{}",
-            "x".repeat(PageContent::MAX_URL_BYTES)
-        ))
-        .unwrap();
-        let err = PageContent::new(
-            oversized_url,
-            "text/html",
-            Vec::new(),
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("page URL"));
-
-        let err = PageContent::new(
-            Url::parse("https://example.org/").unwrap(),
-            "x".repeat(PageContent::MAX_CONTENT_TYPE_BYTES + 1),
-            Vec::new(),
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("content type"));
-    }
-
-    #[test]
-    fn with_extracted_text_rejects_oversized_text() {
-        let page = PageContent::new(
-            Url::parse("https://example.org/").unwrap(),
-            "text/html",
-            b"<html></html>".to_vec(),
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap();
-        let err = page
-            .with_extracted_text("x".repeat(PageContent::MAX_TEXT_BYTES + 1))
-            .unwrap_err();
-        assert!(err.is_permanent());
-        assert!(err.to_string().contains("extracted text"));
-    }
-
-    #[test]
     fn search_constraints_serde_round_trip() {
         let c = SearchConstraints::new(
             5,
@@ -990,57 +695,5 @@ mod tests {
         value["allow_local_targets"] = serde_json::Value::Bool(true);
         let err = serde_json::from_value::<SearchConstraints>(value).unwrap_err();
         assert!(err.to_string().contains("allow_local_targets"));
-    }
-
-    #[test]
-    fn page_content_serde_round_trip() {
-        let p = PageContent::new(
-            Url::parse("https://example.org/").unwrap(),
-            "text/html",
-            b"hello".to_vec(),
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap()
-        .with_extracted_text("hello")
-        .unwrap();
-        let json = serde_json::to_string(&p).unwrap();
-        let back: PageContent = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
-    fn page_content_deserialization_rejects_oversized_fields() {
-        let valid = PageContent::new(
-            Url::parse("https://example.org/").unwrap(),
-            "text/html",
-            b"hello".to_vec(),
-            "2026-04-22T00:00:00Z".parse().unwrap(),
-        )
-        .unwrap();
-
-        let mut content_type = serde_json::to_value(&valid).unwrap();
-        content_type["content_type"] =
-            serde_json::Value::String("x".repeat(PageContent::MAX_CONTENT_TYPE_BYTES + 1));
-        let err = serde_json::from_value::<PageContent>(content_type).unwrap_err();
-        assert!(err.to_string().contains("content type"));
-
-        let mut url = serde_json::to_value(&valid).unwrap();
-        url["final_url"] = serde_json::Value::String(format!(
-            "https://example.org/{}",
-            "x".repeat(PageContent::MAX_URL_BYTES)
-        ));
-        let err = serde_json::from_value::<PageContent>(url).unwrap_err();
-        assert!(err.to_string().contains("page URL"));
-
-        let mut body = serde_json::to_value(&valid).unwrap();
-        body["body"] = serde_json::to_value(vec![0_u8; PageContent::MAX_BODY_BYTES + 1]).unwrap();
-        let err = serde_json::from_value::<PageContent>(body).unwrap_err();
-        assert!(err.to_string().contains("page body"));
-
-        let mut text = serde_json::to_value(&valid).unwrap();
-        text["extracted_text"] =
-            serde_json::Value::String("x".repeat(PageContent::MAX_TEXT_BYTES + 1));
-        let err = serde_json::from_value::<PageContent>(text).unwrap_err();
-        assert!(err.to_string().contains("extracted text"));
     }
 }

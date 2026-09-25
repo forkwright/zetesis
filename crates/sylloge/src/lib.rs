@@ -11,14 +11,22 @@
 //!   [`crate::ResearchResult`] in one round trip.
 //! - [`DeepResearch`] — multi-step research with async task lifecycle
 //!   (submit → poll → fetch).
-//! - [`Crawler`] — per-URL full-page content retrieval for when a hit
-//!   needs the body extracted.
+//! - [`Connector`] — the connection-binding seam [`StaticAcquirer`] opens
+//!   each validated address through; consumer egress adapters implement it.
 //!
 //! All three traits hand-roll their async methods as [`BoxFut`] returns
 //! (`Pin<Box<dyn Future + Send>>`) so they stay dyn-compatible — the
 //! future router stores them as `Box<dyn Trait>` / `Arc<dyn Trait>` —
 //! with `Send`-bounded futures and no `async-trait` dependency.
 //! Implementations wrap method bodies in `Box::pin(async move { .. })`.
+//!
+//! # Static acquisition
+//!
+//! [`StaticAcquirer`] is the one concrete anonymous `GET` fetcher. It owns
+//! every hop of a transfer, validates each hop's target before any socket,
+//! connects only to the validated addresses, and returns the hop evidence
+//! with the bounded body in a [`Transfer`]. See the `acquisition` module
+//! documentation on [`StaticAcquirer`] for the policy.
 //!
 //! # Error taxonomy
 //!
@@ -35,11 +43,11 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod acquisition;
 mod budget;
 mod citation;
 mod constraints;
 mod cost;
-mod crawler;
 mod deep;
 mod error;
 mod fixture;
@@ -52,11 +60,16 @@ mod result;
 mod serde_util;
 mod tier;
 
+pub use acquisition::{
+    AcquisitionFailure, AcquisitionLimits, ConnectAttempt, ConnectDeniedSnafu, ConnectError,
+    ConnectIoSnafu, ConnectOutcome, ConnectTimedOutSnafu, ConnectedStream, Connector,
+    DirectConnector, DowngradePolicy, HopRecord, ResponseRecord, SchemePolicy, StaticAcquirer,
+    StaticAcquirerBuilder, TlsRecord, Transfer, TransferOutcome, TrustAnchors,
+};
 pub use budget::{BudgetConstraint, BudgetScope, DAY_WINDOW, SpendEvent, SpendLedger};
 pub use citation::{Citation, SourceKind};
-pub use constraints::{DeepDepth, PageContent, ResearchStatus, SearchConstraints, TaskId};
+pub use constraints::{DeepDepth, ResearchStatus, SearchConstraints, TaskId};
 pub use cost::{CostTracking, ProviderId, ProviderSpend};
-pub use crawler::Crawler;
 pub use deep::DeepResearch;
 pub use error::{
     BudgetExceededSnafu, DomainDeniedSnafu, Error, ErrorClass, FatalCorruptionSnafu,

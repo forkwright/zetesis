@@ -22,9 +22,10 @@ use serde::de::DeserializeOwned;
 use url::Url;
 
 use sylloge::{
-    BudgetConstraint, Citation, CostTracking, FreshnessPolicy, ProvenanceEntry, ProviderSpend,
-    PublicationPrecision, PublicationProvenance, PublicationTime, QueryShape, ResearchResult,
-    ResearchStatus, ResultHit, SearchConstraints, SourceKind, SpendLedger,
+    AcquisitionFailure, AcquisitionLimits, BudgetConstraint, Citation, ConnectOutcome,
+    CostTracking, FreshnessPolicy, HopRecord, ProvenanceEntry, ProviderSpend, PublicationPrecision,
+    PublicationProvenance, PublicationTime, QueryShape, ResearchResult, ResearchStatus,
+    ResponseRecord, ResultHit, SchemePolicy, SearchConstraints, SourceKind, SpendLedger, TlsRecord,
 };
 
 fn ts(s: &str) -> Timestamp {
@@ -47,6 +48,21 @@ where
         &decoded, value,
         "{name}: golden fixture no longer decodes to the same value"
     );
+}
+
+/// Assert `golden` decodes and re-encodes to exactly the same bytes, for
+/// record types that only the acquirer (or a decoder) can build.
+fn assert_golden_round_trip<T>(name: &str, golden: &str) -> T
+where
+    T: Serialize + DeserializeOwned,
+{
+    let decoded: T = serde_json::from_str(golden).unwrap();
+    let encoded = serde_json::to_string_pretty(&decoded).unwrap() + "\n";
+    assert_eq!(
+        encoded, golden,
+        "{name}: golden fixture does not re-encode to the same bytes"
+    );
+    decoded
 }
 
 fn paper_url() -> Url {
@@ -187,4 +203,106 @@ fn research_result_matches_golden_fixture() {
         &result,
         include_str!("fixtures/serialized/research_result.json"),
     );
+}
+
+#[test]
+fn acquisition_limits_match_golden_fixture() {
+    let limits = AcquisitionLimits::new(
+        SchemePolicy::HttpAndHttps,
+        5,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        1024 * 1024,
+    )
+    .unwrap()
+    .with_max_url_bytes(2048)
+    .unwrap()
+    .with_max_header_bytes(64 * 1024)
+    .unwrap();
+    assert_golden(
+        "acquisition_limits",
+        &limits,
+        include_str!("fixtures/serialized/acquisition_limits.json"),
+    );
+}
+
+#[test]
+fn acquisition_failures_match_golden_fixture() {
+    let failures = vec![
+        AcquisitionFailure::UnsafeTarget {
+            reason: "resolved address 10.0.0.7 is in a blocked range".to_owned(),
+        },
+        AcquisitionFailure::SchemeNotAllowed {
+            scheme: "ftp".to_owned(),
+        },
+        AcquisitionFailure::DowngradeRefused,
+        AcquisitionFailure::DeniedPort { port: 25 },
+        AcquisitionFailure::RedirectLimit { max_redirects: 2 },
+        AcquisitionFailure::RedirectLoop {
+            url: Url::parse("http://8.8.8.8/a").unwrap(),
+        },
+        AcquisitionFailure::MalformedRedirect {
+            location: "http://[::1/".to_owned(),
+            reason: "invalid IPv6 address".to_owned(),
+        },
+        AcquisitionFailure::EgressDenied {
+            reason: "resolver refused denied.example".to_owned(),
+        },
+        AcquisitionFailure::ConnectTimeout { timeout_ms: 2000 },
+        AcquisitionFailure::DeadlineExceeded {
+            deadline_ms: 10_000,
+        },
+        AcquisitionFailure::HeaderLimit {
+            max_header_bytes: 8192,
+        },
+        AcquisitionFailure::WireLimit {
+            max_body_bytes: 65_536,
+        },
+    ];
+    assert_golden(
+        "acquisition_failure",
+        &failures,
+        include_str!("fixtures/serialized/acquisition_failure.json"),
+    );
+}
+
+#[test]
+fn hop_records_match_golden_fixture() {
+    let hops: Vec<HopRecord> = assert_golden_round_trip(
+        "hop_records",
+        include_str!("fixtures/serialized/hop_records.json"),
+    );
+    let [served, refused] = hops.as_slice() else {
+        panic!("two hops in the fixture");
+    };
+    assert_eq!(
+        served.connect_attempts()[0].result(),
+        ConnectOutcome::TimedOut,
+        "attempt results keep their order and snake_case names"
+    );
+    assert_eq!(
+        served.tls().map(TlsRecord::server_name),
+        Some("public.example"),
+        "TLS facts decode into the record"
+    );
+    assert_eq!(
+        served.location(),
+        Some("http://127.0.0.1/admin"),
+        "Location"
+    );
+    assert!(
+        refused.resolved().is_empty() && refused.status().is_none(),
+        "a refused hop keeps empty evidence"
+    );
+}
+
+#[test]
+fn response_record_matches_golden_fixture() {
+    let response: ResponseRecord = assert_golden_round_trip(
+        "response_record",
+        include_str!("fixtures/serialized/response_record.json"),
+    );
+    assert_eq!(response.status(), 200, "status");
+    assert_eq!(response.content_length(), Some(5), "content length");
+    assert!(response.content_encoding().is_empty(), "identity body");
 }

@@ -1,5 +1,5 @@
-//! Fail-closed network-target policy for every URL a [`super::Crawler`]
-//! implementation fetches or follows a redirect to (zetesis#48).
+//! Fail-closed network-target policy for every URL
+//! [`super::StaticAcquirer`] fetches or follows a redirect to (zetesis#48).
 //!
 //! [`SearchConstraints::check_url`], [`SearchConstraints::check_url_with`],
 //! and [`SearchConstraints::check_url_with_local_authorization`] are the
@@ -38,6 +38,17 @@ const ALLOWED_SCHEMES: [&str; 2] = ["http", "https"];
 #[non_exhaustive]
 pub struct LocalTargetAuthorization {
     _private: (),
+}
+
+impl LocalTargetAuthorization {
+    /// Crate-internal test authority, so this crate's own tests can prove
+    /// the capability is the only path to a local target. Compiled only for
+    /// this crate's unit tests; integration tests and consumers cannot call
+    /// it.
+    #[cfg(test)]
+    pub(crate) const fn for_crate_tests() -> Self {
+        Self { _private: () }
+    }
 }
 
 impl SearchConstraints {
@@ -80,11 +91,11 @@ impl SearchConstraints {
     ///
     /// The host is resolved exactly once per call. Because a DNS answer
     /// can change between this check and a later connect (rebinding), a
-    /// compliant [`super::Crawler`] implementation connects to one of
-    /// [`ValidatedTarget::addrs`] directly rather than letting its HTTP
-    /// client re-resolve the hostname -- and calls this check again
-    /// against every redirect target, including the final URL, rather
-    /// than trusting the initial URL's pass to cover the whole chain.
+    /// fetch connects to one of [`ValidatedTarget::addrs`] directly rather
+    /// than letting an HTTP client re-resolve the hostname -- and runs this
+    /// check again against every redirect target, including the final URL,
+    /// rather than trusting the initial URL's pass to cover the whole
+    /// chain. [`super::StaticAcquirer`] does both on every hop.
     ///
     /// WARNING: for `http`/`https` (the only schemes this reaches), the
     /// `url` crate's WHATWG-compliant parser never produces a hostless
@@ -128,7 +139,7 @@ impl SearchConstraints {
         self.check_url_with_policy(url, &SystemResolver, Some(authorization))
     }
 
-    fn check_url_with_policy(
+    pub(crate) fn check_url_with_policy(
         &self,
         url: &Url,
         resolver: &dyn Resolver,
@@ -221,6 +232,22 @@ impl SearchConstraints {
     }
 }
 
+impl SearchConstraints {
+    /// Parse both domain lists without checking any URL, so a caller that
+    /// resolves hosts itself ([`super::StaticAcquirer`]) can refuse an
+    /// unusable entry before any DNS I/O, as
+    /// [`SearchConstraints::check_url_with`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::InvalidConstraint`] for an unusable entry.
+    pub(crate) fn validate_domain_rules(&self) -> Result<()> {
+        parse_domain_rules("domain_denylist", self.domain_denylist.as_deref())?;
+        parse_domain_rules("domain_allowlist", self.domain_allowlist.as_deref())?;
+        Ok(())
+    }
+}
+
 /// Parse an optional domain list into canonical rules (see
 /// [`DomainRule`]); `None` stays `None` (no constraint).
 fn parse_domain_rules(field: &str, entries: Option<&[String]>) -> Result<Option<Vec<DomainRule>>> {
@@ -240,6 +267,19 @@ fn parse_domain_rules(field: &str, entries: Option<&[String]>) -> Result<Option<
 /// -- a caching or `DoH` resolver, or (in tests) a canned result that
 /// exercises resolution-dependent policy (e.g. DNS rebinding) without
 /// touching the network.
+///
+/// # Egress refusal
+///
+/// A consumer egress policy that must refuse a host before any DNS lookup
+/// wraps its resolver and returns an error of kind
+/// [`std::io::ErrorKind::PermissionDenied`] without resolving.
+/// [`super::StaticAcquirer`] reports that kind as the permanent
+/// [`super::AcquisitionFailure::EgressDenied`], with no connection attempt;
+/// every other error kind is a (transient) resolution failure.
+///
+/// WARNING: a resolver is never consulted for an IP-literal host, so it
+/// cannot be an egress policy's only enforcement point; the policy must
+/// also refuse in [`super::Connector::connect`], which every hop reaches.
 pub trait Resolver {
     /// Resolve `host` (a non-empty hostname; [`SearchConstraints`] has
     /// already handled IP-literal hosts before calling this) to its
@@ -249,7 +289,9 @@ pub trait Resolver {
     ///
     /// # Errors
     ///
-    /// Any resolution failure (NXDOMAIN, timeout, resolver unreachable).
+    /// Any resolution failure (NXDOMAIN, timeout, resolver unreachable), or
+    /// [`std::io::ErrorKind::PermissionDenied`] for an egress refusal (see
+    /// the trait documentation).
     fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<IpAddr>>;
 }
 
@@ -280,17 +322,12 @@ impl Resolver for SystemResolver {
 /// private fields plus the absence of any public constructor other than those
 /// three policy checks mean no other crate can build one from scratch or
 /// retarget it after validation.
-/// [`super::Crawler`] requires one as its entry parameter (see
-/// [`super::Crawler::fetch_page`]), so calling it with a URL that was
-/// never checked does not compile -- see that trait's `# Enforcement`
-/// doctest.
 ///
-/// A compliant [`super::Crawler`] implementation fetches `url` but
-/// connects to one of [`ValidatedTarget::addrs`] directly rather than
-/// letting its HTTP client re-resolve the hostname -- reusing the
-/// validated resolution instead of re-resolving is what closes the
-/// check-time/connect-time gap a DNS answer can otherwise change across
-/// (rebinding).
+/// [`super::StaticAcquirer`] obtains one per hop and builds that hop's
+/// request from [`ValidatedTarget::url`] while connecting only to
+/// [`ValidatedTarget::addrs`] -- reusing the validated resolution instead of
+/// re-resolving is what closes the check-time/connect-time gap a DNS answer
+/// can otherwise change across (rebinding).
 ///
 /// ```compile_fail
 /// # use sylloge::ValidatedTarget;
@@ -632,7 +669,7 @@ mod tests {
 
     #[test]
     fn check_url_rejects_file_scheme() {
-        // WHY: the exact SSRF repro from zetesis#48 -- a crawler blindly
+        // WHY: the exact SSRF repro from zetesis#48 -- a fetcher blindly
         // following a provider-supplied `file:` URL reads local disk.
         let c = SearchConstraints::default();
         let err = c
@@ -1022,8 +1059,8 @@ mod tests {
 
     #[test]
     fn check_url_ok_returns_resolved_addresses() {
-        // WHY: a compliant Crawler connects to these addresses directly
-        // (see the trait contract in crawler.rs) rather than
+        // WHY: StaticAcquirer connects to these addresses directly (see
+        // the acquisition module's connection-binding docs) rather than
         // re-resolving; this proves the check actually exposes them.
         let c = SearchConstraints::default();
         let url = Url::parse("http://8.8.8.8/").unwrap();

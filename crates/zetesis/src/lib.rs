@@ -4,18 +4,22 @@
 
 pub use elenkhos as steelman;
 pub use sylloge::{
-    BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation, CostTracking, Crawler,
-    DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, Error, ErrorClass,
-    FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy,
-    InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization,
-    MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu, PageContent, PermanentIoSnafu,
-    ProvenanceEntry, Provider, ProviderFailureSnafu, ProviderId, ProviderSpend, ProviderTier,
-    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
-    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimitedSnafu, ResearchResult,
-    ResearchStatus, Resolver, Result, ResultHit, SearchConstraints, SourceKind, SourceRetriever,
-    SpendEvent, SpendLedger, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
-    UnsupportedSnafu, ValidatedTarget, evaluate_freshness,
+    AcquisitionFailure, AcquisitionLimits, BoxFut, BudgetConstraint, BudgetExceededSnafu,
+    BudgetScope, Citation, ConnectAttempt, ConnectDeniedSnafu, ConnectError, ConnectIoSnafu,
+    ConnectOutcome, ConnectTimedOutSnafu, ConnectedStream, Connector, CostTracking, DAY_WINDOW,
+    DeepDepth, DeepResearch, DirectConnector, DomainDeniedSnafu, DowngradePolicy, Error,
+    ErrorClass, FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy,
+    HopRecord, InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch,
+    LocalTargetAuthorization, MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu,
+    PermanentIoSnafu, ProvenanceEntry, Provider, ProviderFailureSnafu, ProviderId, ProviderSpend,
+    ProviderTier, PublicationPrecision, PublicationProvenance, PublicationTime,
+    PublicationTimeCapability, QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimitedSnafu,
+    ResearchResult, ResearchStatus, Resolver, ResponseRecord, Result, ResultHit, SchemePolicy,
+    SearchConstraints, SourceKind, SourceRetriever, SpendEvent, SpendLedger, StaticAcquirer,
+    StaticAcquirerBuilder, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu,
+    TaskUnavailableSnafu, TimeoutSnafu, TlsRecord, Transfer, TransferOutcome, TransientIoSnafu,
+    TrustAnchors, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
+    evaluate_freshness,
 };
 pub use synopsis as briefing;
 
@@ -67,6 +71,81 @@ mod tests {
         .build();
         assert!(e.is_permanent());
         assert!(e.to_string().contains("re-export check"));
+    }
+
+    #[tokio::test]
+    async fn static_acquisition_types_are_reachable_through_facade() {
+        // WHY: the acquisition surface is new in sylloge; a dropped facade
+        // re-export would break consumers silently. Each type is exercised
+        // through the facade path, not only named in a `pub use`.
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let limits = AcquisitionLimits::new(
+            SchemePolicy::HttpAndHttps,
+            3,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            1024,
+        )
+        .unwrap()
+        .with_downgrade(DowngradePolicy::Refuse);
+        let anchor = rcgen::generate_simple_self_signed(vec!["facade.example".to_owned()]).unwrap();
+        let trust = TrustAnchors::from_der([anchor.cert.der().as_ref()]).unwrap();
+        let connector: Arc<dyn Connector> = Arc::new(DirectConnector);
+        let resolver: Arc<dyn Resolver + Send + Sync> = Arc::new(SystemResolver);
+        let builder: StaticAcquirerBuilder = StaticAcquirer::builder(limits, trust);
+        let acquirer = builder
+            .connector(connector)
+            .resolver(resolver)
+            .user_agent("zetesis-facade-test")
+            .build()
+            .unwrap();
+
+        // WHY: a loopback IP literal is refused by policy before any
+        // resolution or socket, so this needs no network access.
+        let transfer: Transfer = acquirer
+            .acquire(
+                &Url::parse("http://127.0.0.1/").unwrap(),
+                &SearchConstraints::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let hops: &[HopRecord] = transfer.hops();
+        let attempts: &[ConnectAttempt] = hops[0].connect_attempts();
+        assert!(attempts.is_empty(), "a refused target is never dialed");
+        let tls: Option<&TlsRecord> = hops[0].tls();
+        assert!(tls.is_none(), "no handshake happened");
+        let response: Option<&ResponseRecord> = transfer.response();
+        assert!(response.is_none(), "a refused transfer has no response");
+        let TransferOutcome::Failed { failure } = transfer.outcome() else {
+            panic!("loopback without authority must fail");
+        };
+        let failure: &AcquisitionFailure = failure;
+        assert_eq!(failure.kind(), "unsafe_target", "policy refusal kind");
+        assert_eq!(
+            failure.class(),
+            ErrorClass::Permanent,
+            "policy never clears"
+        );
+
+        let denied: ConnectError = ConnectDeniedSnafu { reason: "facade" }.build();
+        let timed_out: ConnectError = ConnectTimedOutSnafu.build();
+        let io: ConnectError = snafu::IntoError::into_error(
+            ConnectIoSnafu,
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+        );
+        for err in [denied, timed_out, io] {
+            assert!(!err.to_string().is_empty(), "connect errors render");
+        }
+        let outcome = ConnectOutcome::Denied;
+        assert_ne!(outcome, ConnectOutcome::Connected, "outcomes are distinct");
+        let no_stream: Option<Box<dyn ConnectedStream>> = None;
+        assert!(
+            no_stream.is_none(),
+            "ConnectedStream is nameable as a trait object"
+        );
     }
 
     #[test]
