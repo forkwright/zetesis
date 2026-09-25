@@ -38,6 +38,16 @@ fn web_citation() -> Citation {
     )
 }
 
+/// A paid-tier budget with query, day, and lifetime ceilings set. The
+/// values are test fixtures, not policy.
+fn paid_budget() -> BudgetConstraint {
+    BudgetConstraint::free_only()
+        .with_per_query_cap(500_000)
+        .with_per_day_cap(50_000_000)
+        .with_per_agent_cap(200_000_000)
+        .with_paid_tier_allowed(true)
+}
+
 #[test]
 fn research_result_with_mixed_provenance_reports_provider_count_correctly() {
     let hits = vec![
@@ -117,7 +127,7 @@ fn budget_composes_with_cost_tracking_from_research_result() {
     // Simulate: a Tier-1 call made against a Tier-1 budget; the response's
     // cost_spent is folded into the persisted ledger, which then gates the
     // next call at the same instant.
-    let b = BudgetConstraint::phase_zero_default();
+    let b = paid_budget();
     let now = ts();
     let first_call = CostTracking::from_line_items([ProviderSpend::new("brave", 100_000, 0, 1)]);
     let mut ledger = SpendLedger::new();

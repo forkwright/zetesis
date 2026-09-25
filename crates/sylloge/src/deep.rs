@@ -1,9 +1,9 @@
 //! The [`DeepResearch`] async trait.
 //!
-//! Deep-research backends (GPT Researcher, `open_deep_research`, You.com
-//! `DeepResearch`, Valyu) do not fit the single-round-trip [`super::Provider`]
-//! shape — they run for minutes to hours. This trait models them as a
-//! task lifecycle:
+//! Deep-research backends (the local deep-research loop, and paid
+//! deep-research APIs reserved for budget-authorized use) do not fit the
+//! single-round-trip [`super::Provider`] shape — they run for minutes to
+//! hours. This trait models them as a task lifecycle:
 //!
 //! 1. [`DeepResearch::submit`] — hand the orchestrator a query, get back a
 //!    [`super::TaskId`].

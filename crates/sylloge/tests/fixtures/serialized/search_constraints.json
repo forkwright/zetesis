@@ -1,0 +1,22 @@
+{
+  "max_results": 25,
+  "freshness_window": {
+    "secs": 86400,
+    "nanos": 0
+  },
+  "freshness_policy": "permissive",
+  "language": "en-US",
+  "domain_allowlist": [
+    ".edu"
+  ],
+  "domain_denylist": [
+    "spam.example"
+  ],
+  "budget": {
+    "per_query_cap_micro_cents": 500000,
+    "per_day_cap_micro_cents": 50000000,
+    "per_fleet_day_cap_micro_cents": 0,
+    "per_agent_cap_micro_cents": 200000000,
+    "allow_paid_tier": true
+  }
+}

@@ -28,44 +28,38 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum QueryShape {
     /// Short, entity-centric question expecting a single authoritative fact
-    /// (capital of France, symbol for gold, current CEO). Routes to
-    /// Wikipedia / Wikidata / Crossref DOI lookup first.
+    /// (capital of France, symbol for gold, current CEO). Intended Tier 0
+    /// source: Wikipedia.
     QuickFactual,
 
     /// Exploratory query looking for conceptually-similar material without
-    /// a single correct answer. Semantic-first: Exa, `SearXNG` semantic mode,
-    /// or vector rerank over `OpenAlex` results.
+    /// a single correct answer.
     SemanticDiscovery,
 
     /// Scholarly literature query (papers, citations, authors, venues).
-    /// Routes to Semantic Scholar / `OpenAlex` / Crossref / arXiv / `PubMed`.
+    /// Intended Tier 0 sources: Semantic Scholar and arXiv.
     AcademicLiterature,
 
-    /// Patent search (USPTO, EPO, WIPO). Tier 0 coverage via Google Patents
-    /// public data is thin; Tier 1 (Exa with patent filter) typically
-    /// wins.
+    /// Patent search (USPTO, EPO, WIPO).
     Patent,
 
-    /// Financial filings, market data, analyst reports (SEC EDGAR for
-    /// filings, Tier 1 paid providers for the rest).
+    /// Financial filings, market data, analyst reports.
     Finance,
 
-    /// Legal research (case law, statutes). Free-tier coverage is thin
-    /// outside `CourtListener`; Tier 1 (Lexis-alternatives) for depth.
+    /// Legal research (case law, statutes).
     Legal,
 
     /// News / social / status-page query where results older than hours or
-    /// days are stale. Free-tier Wikipedia is useless here; routes to
-    /// Brave news, Tavily recency mode, or Common Crawl recent slice.
+    /// days are stale. The planned Tier 0 cohort does not cover it, so it
+    /// stays an explicit gap while paid routing is disabled.
     FreshnessSensitive,
 
-    /// Default bucket when no more specific shape applies. Router treats it
-    /// as "try Tier 0 broad, fall through on miss".
+    /// Default bucket when no more specific shape applies.
     #[default]
     GeneralResearch,
 
-    /// Source-code / package / repository discovery (GitHub search, crates.io,
-    /// package registries). Routes to GitHub API + `SearXNG` code mode.
+    /// Source-code / package / repository discovery (code forges, package
+    /// registries).
     CodeAndPackages,
 
     /// Dataset / benchmark / corpus discovery (`HuggingFace` Hub, Kaggle,

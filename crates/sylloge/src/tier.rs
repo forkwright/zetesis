@@ -1,9 +1,11 @@
 //! Provider tier classification.
 //!
-//! Every zetesis provider declares which tier it belongs to. The router
-//! walks tiers in ascending order (Tier 0 → Tier 1 → Tier 2 → Tier 3) until
-//! a provider either serves the query or the budget is exhausted. This is
-//! the core mechanism implementing the "free-first" principle.
+//! Every zetesis provider declares which tier it belongs to. Tiers order
+//! preference: free Tier 0 first. A paid tier is eligible only when the
+//! caller's budget explicitly enables paid spend and a reservation for the
+//! attempt succeeds; a Tier 0 miss never enables paid use on its own, and
+//! there is no automatic paid fallback. Paid routing stays disabled until
+//! durable budget enforcement lands (zetesis#47).
 
 use serde::{Deserialize, Serialize};
 
@@ -21,14 +23,14 @@ pub enum ProviderTier {
     /// here.
     Tier0Free,
 
-    /// Paid APIs at low per-query cost (Brave, Tavily free tier plus paid,
-    /// Exa starter). Attempted only after Tier 0 misses or when the shape
-    /// is known to be outside Tier 0's coverage.
+    /// Paid per-query APIs (for example Brave, Exa, Tavily). Eligible only
+    /// under an explicitly paid-enabled, reserved budget; never an automatic
+    /// fallback for a Tier 0 miss.
     Tier1Cheap,
 
-    /// Self-hosted orchestration (GPT Researcher / `open_deep_research` on
-    /// logismos local LLMs). Zero marginal cost but high latency.
-    /// Preferred over Tier 3 for deep-research shapes.
+    /// Self-hosted orchestration: the local deep-research loop against a
+    /// consumer-granted model (Logismos owns inference execution). No
+    /// provider spend; bounded by the granted compute and latency.
     Tier2SelfHosted,
 
     /// Paid deep-research APIs (You.com, Valyu, Perplexity `DeepResearch`).
@@ -55,7 +57,7 @@ impl ProviderTier {
         matches!(self, Self::Tier1Cheap | Self::Tier3PaidDeep)
     }
 
-    /// Ascending sort order for the free-first fallback chain.
+    /// Ascending free-first preference order.
     ///
     /// Lower number = tried first. Derived `PartialOrd` on the enum already
     /// produces this order, but the explicit accessor documents the

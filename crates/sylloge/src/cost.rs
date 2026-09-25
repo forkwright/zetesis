@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Stable provider identifier matching `Provider::name()`.
 ///
@@ -131,7 +131,11 @@ impl ProviderSpend {
 /// (including failed attempts — a failed Tier 0 call that fell through to
 /// Tier 1 appears as two entries). The keys in `by_provider` are sorted
 /// (`BTreeMap`) so serialization is deterministic across ledger writes.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Deserialization rejects a map entry whose key differs from its line
+/// item's `provider_id`: [`CostTracking::add`] can never produce one, and
+/// accepting it would attribute one provider's spend to another.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[non_exhaustive]
 pub struct CostTracking {
     /// Per-provider breakdown keyed by `ProviderSpend::provider_id`.
@@ -201,6 +205,33 @@ impl CostTracking {
     #[must_use]
     pub fn any_paid(&self) -> bool {
         self.by_provider.values().any(ProviderSpend::is_paid)
+    }
+}
+
+#[derive(Deserialize)]
+struct CostTrackingWire {
+    by_provider: BTreeMap<ProviderId, ProviderSpend>,
+}
+
+impl<'de> Deserialize<'de> for CostTracking {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CostTrackingWire::deserialize(deserializer)?;
+        if let Some((key, item)) = wire
+            .by_provider
+            .iter()
+            .find(|(key, item)| **key != item.provider_id)
+        {
+            return Err(serde::de::Error::custom(format!(
+                "cost line item for provider '{}' is keyed under '{key}'",
+                item.provider_id
+            )));
+        }
+        Ok(Self {
+            by_provider: wire.by_provider,
+        })
     }
 }
 

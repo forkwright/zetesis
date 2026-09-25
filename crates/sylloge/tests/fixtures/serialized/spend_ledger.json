@@ -1,0 +1,9 @@
+{
+  "lifetime_paid_micro_cents": 150,
+  "events": [
+    {
+      "at": "2026-07-01T00:00:00Z",
+      "paid_micro_cents": 100
+    }
+  ]
+}
