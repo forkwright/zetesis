@@ -19,8 +19,8 @@ use url::Url;
 use sylloge::{
     BoxFut, BudgetConstraint, Citation, ConnectDeniedSnafu, ConnectError, ConnectedStream,
     Connector, CostTracking, DeepDepth, DeepResearch, DirectConnector, Error, Provider,
-    ProviderSpend, ProviderTier, QueryShape, ResearchResult, ResearchStatus, Result, ResultHit,
-    SearchConstraints, SourceKind, TaskId,
+    ProviderAnswer, ProviderSpend, ProviderTier, QueryShape, ResearchResult, ResearchStatus,
+    Result, ResultHit, SearchConstraints, SourceKind, TaskId,
 };
 
 struct StubProvider;
@@ -38,7 +38,7 @@ impl Provider for StubProvider {
         &'a self,
         query: &'a str,
         _constraints: &'a SearchConstraints,
-    ) -> BoxFut<'a, Result<ResearchResult>> {
+    ) -> BoxFut<'a, ProviderAnswer> {
         Box::pin(async move {
             let ts: Timestamp = "2026-04-22T00:00:00Z".parse().unwrap();
             let citation = Citation::new(
@@ -57,14 +57,15 @@ impl Provider for StubProvider {
             )
             .unwrap();
             let cost = CostTracking::from_line_items([ProviderSpend::new("stub", 0, 1, 1)]);
-            Ok(ResearchResult::new(
+            let result = ResearchResult::new(
                 query,
                 QueryShape::QuickFactual,
                 vec![hit],
                 Vec::new(),
                 cost,
                 "stub-cache-key",
-            ))
+            );
+            ProviderAnswer::new(Ok(result), Vec::new(), 1)
         })
     }
 }
@@ -129,7 +130,7 @@ impl Connector for DenyAllConnector {
 async fn provider_is_dyn_compatible() {
     let providers: Vec<Arc<dyn Provider>> = vec![Arc::new(StubProvider)];
     let constraints = SearchConstraints::new(5, BudgetConstraint::default());
-    let out = providers[0].search("q", &constraints).await.unwrap();
+    let out = providers[0].search("q", &constraints).await.result.unwrap();
     assert_eq!(out.query, "q");
     assert_eq!(providers[0].name(), "stub");
     assert_eq!(providers[0].tier(), ProviderTier::Tier0Free);
@@ -183,7 +184,7 @@ async fn provider_collection_round_trips_over_dyn() {
     let results = futures::future::join_all(futures).await;
     assert_eq!(results.len(), 2);
     for r in results {
-        let out = r.unwrap();
+        let out = r.result.unwrap();
         assert_eq!(out.query, "concurrent");
     }
 }

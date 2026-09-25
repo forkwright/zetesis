@@ -13,10 +13,10 @@ use jiff::Timestamp;
 use serde_json::{Value, json};
 use sylloge::{
     Arxiv, AttemptOutcome, BoxFut, BudgetConstraint, Citation, CostTracking, Error, ErrorClass,
-    EvidenceState, FatalCorruptionSnafu, FreshnessBasis, FreshnessPolicy, Provider,
-    ProviderAttempt, ProviderTier, QueryShape, RateLimitedSnafu, RefusalReason, ResearchResult,
-    Result, ResultHit, Router, SearchConstraints, SemanticScholar, SourceKind, UnauthorizedSnafu,
-    Wikipedia,
+    EvidenceState, FatalCorruptionSnafu, FreshnessBasis, FreshnessPolicy, Provider, ProviderAnswer,
+    ProviderAttempt, ProviderId, ProviderTier, PublicationPrecision, PublicationTimeCapability,
+    QueryShape, RateLimitedSnafu, RefusalReason, ResearchResult, Result, ResultHit, Router,
+    SearchConstraints, SemanticScholar, SourceKind, UnauthorizedSnafu, Wikipedia,
 };
 use url::Url;
 
@@ -61,6 +61,7 @@ struct Stub {
     name: &'static str,
     tier: ProviderTier,
     shapes: &'static [QueryShape],
+    capability: PublicationTimeCapability,
     reply: Reply,
     calls: AtomicUsize,
 }
@@ -76,10 +77,35 @@ impl Stub {
         shapes: &'static [QueryShape],
         reply: Reply,
     ) -> Arc<Self> {
+        Self::build(
+            name,
+            tier,
+            shapes,
+            PublicationTimeCapability::Unsupported,
+            reply,
+        )
+    }
+
+    /// A Tier-0 stub that declares date-precision publication times.
+    fn dated(name: &'static str, shapes: &'static [QueryShape], reply: Reply) -> Arc<Self> {
+        let capability = PublicationTimeCapability::Supported {
+            precision: PublicationPrecision::DateOnly,
+        };
+        Self::build(name, ProviderTier::Tier0Free, shapes, capability, reply)
+    }
+
+    fn build(
+        name: &'static str,
+        tier: ProviderTier,
+        shapes: &'static [QueryShape],
+        capability: PublicationTimeCapability,
+        reply: Reply,
+    ) -> Arc<Self> {
         Arc::new(Self {
             name,
             tier,
             shapes,
+            capability,
             reply,
             calls: AtomicUsize::new(0),
         })
@@ -103,29 +129,40 @@ impl Provider for Stub {
         self.shapes
     }
 
+    fn publication_time_capability(&self) -> PublicationTimeCapability {
+        self.capability
+    }
+
     fn search<'a>(
         &'a self,
         query: &'a str,
         _constraints: &'a SearchConstraints,
-    ) -> BoxFut<'a, Result<ResearchResult>> {
+    ) -> BoxFut<'a, ProviderAnswer> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let (hits, malformed_records) = match &self.reply {
-                Reply::Hits(hits) => (hits.clone(), 0),
-                Reply::Parsed(hits, malformed) => (hits.clone(), *malformed),
-                Reply::Fail(make) => return Err(make()),
-            };
-            let mut result = ResearchResult::new(
-                query,
-                QueryShape::GeneralResearch,
-                hits,
-                Vec::new(),
-                CostTracking::default(),
-                "stub",
-            );
-            result.malformed_records = malformed_records;
-            Ok(result)
+            ProviderAnswer::new(self.reply.result(query), Vec::new(), 1)
         })
+    }
+}
+
+impl Reply {
+    /// The provider result this reply stands for.
+    fn result(&self, query: &str) -> Result<ResearchResult> {
+        let (hits, malformed_records) = match self {
+            Reply::Hits(hits) => (hits.clone(), 0),
+            Reply::Parsed(hits, malformed) => (hits.clone(), *malformed),
+            Reply::Fail(make) => return Err(make()),
+        };
+        let mut result = ResearchResult::new(
+            query,
+            QueryShape::GeneralResearch,
+            hits,
+            Vec::new(),
+            CostTracking::default(),
+            "stub",
+        );
+        result.malformed_records = malformed_records;
+        Ok(result)
     }
 }
 
@@ -149,12 +186,13 @@ fn wikipedia_hits() -> Reply {
 }
 
 /// The first cohort in its canonical registration order, each stub
-/// declaring the shapes its provider's policy records.
+/// declaring the shapes its provider's policy records and whether its
+/// provider dates its hits.
 fn cohort(wikipedia: Reply, s2: Reply, arxiv: Reply) -> (Router, [Arc<Stub>; 3]) {
     let stubs = [
         Stub::new("wikipedia", Wikipedia::POLICY.query_shapes, wikipedia),
-        Stub::new("semantic_scholar", SemanticScholar::POLICY.query_shapes, s2),
-        Stub::new("arxiv", Arxiv::POLICY.query_shapes, arxiv),
+        Stub::dated("semantic_scholar", SemanticScholar::POLICY.query_shapes, s2),
+        Stub::dated("arxiv", Arxiv::POLICY.query_shapes, arxiv),
     ];
     let providers: Vec<Arc<dyn Provider>> = stubs
         .iter()
@@ -666,17 +704,105 @@ async fn a_title_and_year_match_without_conflicting_identity_merges() {
     );
 }
 
+/// A hit with a declared year and authors, as a provider's parser would
+/// record them.
+fn authored_hit(title: &str, url: &str, year: i64, authors: &[&str]) -> ResultHit {
+    web_hit(title, url)
+        .with_metadata("year", json!(year))
+        .with_metadata("authors", json!(authors))
+}
+
 #[tokio::test]
-async fn strict_freshness_drops_undated_hits_and_counts_them() {
-    let (router, _) = cohort(wikipedia_hits(), empty(), empty());
-    let constraints = SearchConstraints::default().with_freshness(Duration::from_secs(86_400));
-    let result = search(&router, QueryShape::QuickFactual, &constraints).await;
-    assert!(
-        result.hits.is_empty(),
-        "undated wiki hits fail a strict window; nothing fills their place"
+async fn a_title_and_year_match_without_a_shared_author_stays_separate_and_marked() {
+    let (router, _) = cohort(
+        empty(),
+        Reply::Hits(vec![authored_hit(
+            "Introduction",
+            "https://www.semanticscholar.org/paper/intro-alpha",
+            2020,
+            &["Alice Alpha"],
+        )]),
+        Reply::Hits(vec![authored_hit(
+            "Introduction.",
+            "http://arxiv.org/abs/2001.00001v1",
+            2020,
+            &["Bob Beta"],
+        )]),
+    );
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        titles(&result),
+        ["Introduction", "Introduction."],
+        "equal titles and years by different authors are two works"
     );
     assert_eq!(
-        outcome(&result, "wikipedia"),
+        hit(&result, "Introduction").metadata.get("conflicts_with"),
+        Some(&json!(["http://arxiv.org/abs/2001.00001v1"])),
+        "each names its look-alike"
+    );
+    assert_eq!(
+        hit(&result, "Introduction.").metadata.get("conflicts_with"),
+        Some(&json!([
+            "https://www.semanticscholar.org/paper/intro-alpha"
+        ])),
+        "and is named back"
+    );
+}
+
+#[tokio::test]
+async fn a_title_and_year_match_with_a_shared_author_family_name_merges() {
+    let (router, _) = cohort(
+        empty(),
+        Reply::Hits(vec![authored_hit(
+            "Introduction",
+            "https://www.semanticscholar.org/paper/intro-alpha",
+            2020,
+            &["Alice Alpha", "Carol Gamma"],
+        )]),
+        Reply::Hits(vec![authored_hit(
+            "Introduction.",
+            "http://arxiv.org/abs/2001.00001v1",
+            2020,
+            &["ALPHA, A."],
+        )]),
+    );
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        titles(&result),
+        ["Introduction"],
+        "`Alice Alpha` and `ALPHA, A.` share the family name `alpha`"
+    );
+    assert_eq!(
+        hit(&result, "Introduction").citations.len(),
+        2,
+        "both records corroborate the merged hit"
+    );
+}
+
+#[tokio::test]
+async fn strict_freshness_drops_undated_hits_and_counts_them() {
+    // WHY: a provider that dates its hits may still return an undated one;
+    // the Semantic Scholar stub here returns the recorded (undated) wiki
+    // hits.
+    let (router, _) = cohort(empty(), wikipedia_hits(), empty());
+    let constraints = SearchConstraints::default().with_freshness(Duration::from_secs(86_400));
+    let result = search(&router, QueryShape::SemanticDiscovery, &constraints).await;
+    assert!(
+        result.hits.is_empty(),
+        "undated hits fail a strict window; nothing fills their place"
+    );
+    assert_eq!(
+        outcome(&result, "semantic_scholar"),
         serde_json::from_value::<AttemptOutcome>(json!({
             "status": "answered",
             "returned": 2,
@@ -953,7 +1079,7 @@ async fn malformed_records_are_counted_in_the_receipt_and_the_result() {
 }
 
 #[tokio::test]
-async fn a_provider_whose_records_were_all_malformed_answered_without_evidence() {
+async fn a_provider_whose_records_were_all_malformed_did_not_answer() {
     let stub = Stub::new(
         "wikipedia",
         &[QueryShape::QuickFactual],
@@ -977,7 +1103,42 @@ async fn a_provider_whose_records_were_all_malformed_answered_without_evidence()
         ),
         "dropped records are not an empty answer"
     );
-    assert_eq!(result.evidence_state(), EvidenceState::NoEvidence);
+    assert_eq!(
+        result.evidence_state(),
+        EvidenceState::Unanswered,
+        "an answer made only of malformed records answered nothing"
+    );
+}
+
+#[tokio::test]
+async fn evidence_state_is_incomplete_when_a_miss_sits_beside_an_unanswered_provider() {
+    let rate_limited = Reply::Fail(|| {
+        RateLimitedSnafu {
+            provider: "semantic_scholar",
+            retry_after_ms: Some(5_000_u64),
+        }
+        .build()
+    });
+    for (s2, case) in [
+        (rate_limited, "a 429"),
+        (
+            Reply::Parsed(Vec::new(), 2),
+            "an answer of only malformed records",
+        ),
+    ] {
+        let (router, _) = cohort(empty(), s2, empty());
+        let result = search(
+            &router,
+            QueryShape::AcademicLiterature,
+            &SearchConstraints::default(),
+        )
+        .await;
+        assert_eq!(
+            result.evidence_state(),
+            EvidenceState::Incomplete,
+            "arXiv found nothing, but {case} from Semantic Scholar leaves the search incomplete"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1021,9 +1182,9 @@ async fn evidence_state_is_no_evidence_when_a_provider_answered_and_nothing_surv
         "providers answered with no hits"
     );
 
-    let (router, _) = cohort(wikipedia_hits(), empty(), empty());
+    let (router, _) = cohort(empty(), wikipedia_hits(), empty());
     let strict = SearchConstraints::default().with_freshness(Duration::from_secs(86_400));
-    let screened_out = search(&router, QueryShape::QuickFactual, &strict).await;
+    let screened_out = search(&router, QueryShape::SemanticDiscovery, &strict).await;
     assert_eq!(
         screened_out.evidence_state(),
         EvidenceState::NoEvidence,
@@ -1158,6 +1319,89 @@ fn duplicate_provider_names_are_refused() {
 }
 
 #[test]
+fn an_attempt_timeout_past_the_clock_is_refused() {
+    let err = Router::new(Vec::new(), Duration::MAX).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidConstraint { ref field, .. } if field == "attempt_timeout"),
+        "a deadline that cannot be represented would fail every attempt at once: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn only_free_and_self_hosted_tiers_are_routed() {
+    let shapes: &'static [QueryShape] = &[QueryShape::GeneralResearch];
+    let stubs = [
+        Stub::tiered("free", ProviderTier::Tier0Free, shapes, empty()),
+        Stub::tiered("cheap", ProviderTier::Tier1Cheap, shapes, empty()),
+        Stub::tiered(
+            "self_hosted",
+            ProviderTier::Tier2SelfHosted,
+            shapes,
+            empty(),
+        ),
+        Stub::tiered("paid_deep", ProviderTier::Tier3PaidDeep, shapes, empty()),
+    ];
+    let router = router_of(&stubs);
+    let result = search(
+        &router,
+        QueryShape::GeneralResearch,
+        &SearchConstraints::default(),
+    )
+    .await;
+    let refused = AttemptOutcome::Refused {
+        reason: RefusalReason::PaidRoutingUnavailable,
+    };
+    assert_eq!(
+        attempts(&result)
+            .into_iter()
+            .map(|(name, attempt)| (name, attempt.outcome))
+            .collect::<Vec<_>>(),
+        [
+            ("free".to_owned(), AttemptOutcome::Empty),
+            ("cheap".to_owned(), refused.clone()),
+            ("self_hosted".to_owned(), AttemptOutcome::Empty),
+            ("paid_deep".to_owned(), refused),
+        ],
+        "Tier 0 and Tier 2 are called; every other tier is refused"
+    );
+    assert_eq!(
+        stubs.iter().map(|stub| stub.calls()).collect::<Vec<_>>(),
+        [1, 0, 1, 0],
+        "refused tiers are never called"
+    );
+}
+
+#[tokio::test]
+async fn strict_freshness_refuses_a_provider_that_cannot_date_its_hits() {
+    let (router, [wikipedia, ..]) = cohort(wikipedia_hits(), empty(), empty());
+    let strict = SearchConstraints::default().with_freshness(Duration::from_secs(86_400));
+    let result = search(&router, QueryShape::QuickFactual, &strict).await;
+    assert_eq!(
+        serde_json::to_value(outcome(&result, "wikipedia")).unwrap(),
+        json!({"status": "refused", "reason": "publication_time_unsupported"}),
+        "a provider that declares no publication times cannot pass a strict window"
+    );
+    assert_eq!(wikipedia.calls(), 0, "so it is not called");
+
+    let permissive = strict.with_freshness_policy(FreshnessPolicy::Permissive);
+    let result = search(&router, QueryShape::QuickFactual, &permissive).await;
+    assert!(
+        matches!(
+            outcome(&result, "wikipedia"),
+            AttemptOutcome::Answered { returned: 2, .. }
+        ),
+        "a permissive window lets the provider answer"
+    );
+    let result = search(
+        &router,
+        QueryShape::QuickFactual,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(titles(&result).len(), 2, "and so does no window at all");
+}
+
+#[test]
 fn router_search_future_is_send() {
     // WHY: consumers run searches on multi-threaded executors
     // (`tokio::spawn`), which needs a `Send` future.
@@ -1210,33 +1454,15 @@ struct Scripted {
     name: &'static str,
     shapes: &'static [QueryShape],
     steps: std::sync::Mutex<std::collections::VecDeque<Step>>,
-    calls: AtomicUsize,
-    min_interval: Duration,
 }
 
 impl Scripted {
     fn new(name: &'static str, shapes: &'static [QueryShape], steps: Vec<Step>) -> Arc<Self> {
-        Self::paced(name, shapes, steps, Duration::ZERO)
-    }
-
-    /// A scripted provider that declares `min_interval` between requests.
-    fn paced(
-        name: &'static str,
-        shapes: &'static [QueryShape],
-        steps: Vec<Step>,
-        min_interval: Duration,
-    ) -> Arc<Self> {
         Arc::new(Self {
             name,
             shapes,
             steps: std::sync::Mutex::new(steps.into()),
-            calls: AtomicUsize::new(0),
-            min_interval,
         })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
     }
 }
 
@@ -1253,37 +1479,26 @@ impl Provider for Scripted {
         self.shapes
     }
 
-    fn min_request_interval(&self) -> Duration {
-        self.min_interval
-    }
-
     fn search<'a>(
         &'a self,
         query: &'a str,
         _constraints: &'a SearchConstraints,
-    ) -> BoxFut<'a, Result<ResearchResult>> {
+    ) -> BoxFut<'a, ProviderAnswer> {
         Box::pin(async move {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             let next = self.steps.lock().unwrap().pop_front();
             let Some(Step { delay, reply }) = next else {
-                return Ok(ResearchResult::empty(
-                    query,
-                    QueryShape::GeneralResearch,
-                    "stub",
-                ));
+                return ProviderAnswer::new(
+                    Ok(ResearchResult::empty(
+                        query,
+                        QueryShape::GeneralResearch,
+                        "stub",
+                    )),
+                    Vec::new(),
+                    1,
+                );
             };
             tokio::time::sleep(delay).await;
-            match reply {
-                Reply::Hits(hits) | Reply::Parsed(hits, _) => Ok(ResearchResult::new(
-                    query,
-                    QueryShape::GeneralResearch,
-                    hits,
-                    Vec::new(),
-                    CostTracking::default(),
-                    "stub",
-                )),
-                Reply::Fail(make) => Err(make()),
-            }
+            ProviderAnswer::new(reply.result(query), Vec::new(), 1)
         })
     }
 }
@@ -1297,211 +1512,6 @@ fn scripted_router(providers: &[Arc<Scripted>], timeout: Duration) -> Router {
         timeout,
     )
     .unwrap()
-}
-
-/// A 429 asking the caller to hold off five seconds.
-fn rate_limited_for_5s() -> Reply {
-    Reply::Fail(|| {
-        RateLimitedSnafu {
-            provider: "semantic_scholar",
-            retry_after_ms: Some(5_000_u64),
-        }
-        .build()
-    })
-}
-
-/// A 429 asking the caller to hold off a minute.
-fn rate_limited_for_60s() -> Reply {
-    Reply::Fail(|| {
-        RateLimitedSnafu {
-            provider: "semantic_scholar",
-            retry_after_ms: Some(60_000_u64),
-        }
-        .build()
-    })
-}
-
-const DISCOVERY: &[QueryShape] = &[QueryShape::SemanticDiscovery];
-
-#[tokio::test(start_paused = true)]
-async fn a_providers_declared_interval_spaces_its_attempts() {
-    let provider = Scripted::paced(
-        "arxiv",
-        DISCOVERY,
-        vec![
-            step(
-                0,
-                Reply::Hits(vec![web_hit("First", "https://example.org/1")]),
-            ),
-            step(
-                0,
-                Reply::Hits(vec![web_hit("Second", "https://example.org/2")]),
-            ),
-        ],
-        Duration::from_secs(3),
-    );
-    let router = scripted_router(&[Arc::clone(&provider)], ATTEMPT_TIMEOUT);
-    let start = tokio::time::Instant::now();
-    let first = search(
-        &router,
-        QueryShape::SemanticDiscovery,
-        &SearchConstraints::default(),
-    )
-    .await;
-    assert_eq!(
-        start.elapsed(),
-        Duration::ZERO,
-        "the first attempt starts at once"
-    );
-    let second = search(
-        &router,
-        QueryShape::SemanticDiscovery,
-        &SearchConstraints::default(),
-    )
-    .await;
-    assert_eq!(
-        start.elapsed(),
-        Duration::from_secs(3),
-        "the next attempt waits out the provider's declared interval"
-    );
-    assert_eq!(
-        (titles(&first), titles(&second)),
-        (vec!["First"], vec!["Second"]),
-        "both attempts are answered in order"
-    );
-    assert_eq!(provider.calls(), 2, "one call per attempt");
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_retry_after_holds_the_next_attempt_to_that_provider() {
-    let provider = Scripted::new(
-        "semantic_scholar",
-        DISCOVERY,
-        vec![
-            step(0, rate_limited_for_5s()),
-            step(
-                0,
-                Reply::Hits(vec![web_hit("After the hold", "https://example.org/a")]),
-            ),
-        ],
-    );
-    let router = scripted_router(&[Arc::clone(&provider)], ATTEMPT_TIMEOUT);
-    let first = search(
-        &router,
-        QueryShape::SemanticDiscovery,
-        &SearchConstraints::default(),
-    )
-    .await;
-    assert!(
-        matches!(
-            outcome(&first, "semantic_scholar"),
-            AttemptOutcome::Failed {
-                class: ErrorClass::Transient,
-                ..
-            }
-        ),
-        "the 429 is receipted"
-    );
-
-    let start = tokio::time::Instant::now();
-    let second = search(
-        &router,
-        QueryShape::SemanticDiscovery,
-        &SearchConstraints::default(),
-    )
-    .await;
-    assert_eq!(
-        start.elapsed(),
-        Duration::from_secs(5),
-        "the next attempt waits out the Retry-After"
-    );
-    assert_eq!(titles(&second), ["After the hold"], "then it is answered");
-    assert_eq!(provider.calls(), 2, "one call per attempt");
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_503_retry_after_holds_the_next_attempt_to_that_provider() {
-    let provider = Scripted::new(
-        "wikipedia",
-        &[QueryShape::QuickFactual],
-        vec![step(
-            0,
-            Reply::Fail(|| Wikipedia::parse(503, &[("retry-after", "7")], b"", now()).unwrap_err()),
-        )],
-    );
-    let router = scripted_router(&[provider], ATTEMPT_TIMEOUT);
-    search(
-        &router,
-        QueryShape::QuickFactual,
-        &SearchConstraints::default(),
-    )
-    .await;
-    let start = tokio::time::Instant::now();
-    let second = search(
-        &router,
-        QueryShape::QuickFactual,
-        &SearchConstraints::default(),
-    )
-    .await;
-    assert_eq!(
-        start.elapsed(),
-        Duration::from_secs(7),
-        "a 503 with Retry-After holds the provider like a 429"
-    );
-    assert_eq!(
-        outcome(&second, "wikipedia"),
-        AttemptOutcome::Empty,
-        "then it answers"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_hold_past_the_deadline_fails_the_attempt_as_rate_limited_without_waiting() {
-    let provider = Scripted::new(
-        "semantic_scholar",
-        DISCOVERY,
-        vec![
-            step(0, rate_limited_for_60s()),
-            step(
-                0,
-                Reply::Hits(vec![web_hit("Never asked", "https://example.org/b")]),
-            ),
-        ],
-    );
-    let router = scripted_router(&[Arc::clone(&provider)], Duration::from_secs(10));
-    search(
-        &router,
-        QueryShape::SemanticDiscovery,
-        &SearchConstraints::default(),
-    )
-    .await;
-
-    let start = tokio::time::Instant::now();
-    let second = search(
-        &router,
-        QueryShape::SemanticDiscovery,
-        &SearchConstraints::default(),
-    )
-    .await;
-    assert_eq!(
-        start.elapsed(),
-        Duration::ZERO,
-        "no sleep past the deadline"
-    );
-    assert_eq!(provider.calls(), 1, "the provider is not called again");
-    assert!(
-        matches!(
-            outcome(&second, "semantic_scholar"),
-            AttemptOutcome::Failed { class: ErrorClass::Transient, ref message }
-                if message.contains("rate limited") && message.contains("60000")
-        ),
-        "the attempt fails as rate-limited, naming the remaining hold"
-    );
-    assert!(
-        second.cost_spent.by_provider.is_empty(),
-        "an attempt that never called costs nothing"
-    );
-    assert_eq!(second.evidence_state(), EvidenceState::Unanswered);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1555,10 +1565,11 @@ async fn an_attempt_past_its_timeout_is_receipted_as_timed_out() {
         result
             .cost_spent
             .by_provider
-            .get("semantic_scholar")
-            .map(|l| l.request_count),
-        Some(1),
-        "the timed-out call was made, so it is counted"
+            .keys()
+            .map(ProviderId::as_str)
+            .collect::<Vec<_>>(),
+        ["arxiv"],
+        "whether the cancelled call's request left is unknown, so none is counted for it"
     );
 }
 

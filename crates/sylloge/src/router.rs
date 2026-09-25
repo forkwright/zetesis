@@ -11,24 +11,25 @@ use snafu::ensure;
 use tokio::time::Instant;
 use url::Url;
 
+use crate::acquisition::saturating_millis;
 use crate::constraints::{DomainRule, SearchConstraints};
 use crate::cost::{CostTracking, ProviderSpend};
 use crate::digest::Sha256;
-use crate::error::{
-    Error, InvalidConstraintSnafu, InvalidQuerySnafu, RateLimitedSnafu, Result, UnsupportedSnafu,
-};
+use crate::error::{Error, InvalidConstraintSnafu, InvalidQuerySnafu, Result, UnsupportedSnafu};
+use crate::freshness::{FreshnessPolicy, PublicationTimeCapability};
 use crate::net_policy::parse_domain_rules;
-use crate::pacing::Pacer;
+use crate::pacing::within_deadline;
 use crate::provider::Provider;
 use crate::providers::{
-    DoiIdentity, META_ARXIV_DOI, META_ARXIV_ID, META_DOI, META_PAGEID, META_S2_PAPER_ID, META_YEAR,
-    classify_doi, collapse_whitespace, normalize_arxiv_id,
+    DoiIdentity, META_ARXIV_DOI, META_ARXIV_ID, META_AUTHORS, META_DOI, META_PAGEID,
+    META_S2_PAPER_ID, META_YEAR, classify_doi, collapse_whitespace, normalize_arxiv_id,
 };
 use crate::query::QueryShape;
 use crate::result::{
     AttemptOutcome, ProvenanceEntry, ProviderAttempt, RefusalReason, ResearchResult, ResultHit,
     cmp_score,
 };
+use crate::tier::ProviderTier;
 
 /// Domain tag opening every cache-key encoding.
 const CACHE_KEY_DOMAIN: &[u8] = b"zetesis.sylloge.router.cache_key.v1";
@@ -69,22 +70,31 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// permanent failure of one provider does not stop the others; only a
 /// fatal error aborts the route.
 ///
-/// Each attempt has the router's per-attempt timeout as its deadline. The
-/// attempt first waits for the provider's pacing slot: requests to one
-/// provider start at least [`Provider::min_request_interval`] apart, and a
-/// provider that answered with `Retry-After` (a 429, or a 503 carrying one)
-/// is not asked again until that delay has passed. A slot that opens after the deadline
-/// fails the attempt as rate-limited at once, without waiting and without
-/// calling the provider. A call still running at the deadline is cancelled
-/// and receipted as timed out. A receipt names the fingerprints of the
-/// evidence envelopes the provider's call produced
-/// ([`Provider::search_with_evidence`]); the bodies are not kept.
-/// A paid-tier provider is refused unconditionally, whatever the caller's
-/// [`crate::BudgetConstraint`] says: paid spend needs a durable ledger
-/// that can reserve and settle per attempt, which does not exist yet, and
-/// a Tier-0 miss never enables paid use. Each call made records one free
-/// request in [`ResearchResult::cost_spent`]; a refused provider records
-/// nothing.
+/// Each attempt has the router's per-attempt timeout as its deadline, and
+/// the provider call runs with that deadline in scope. Pacing and
+/// connection limits belong to each provider instance, not to the router
+/// (see [`Provider`]): a first-cohort provider that would have to wait for
+/// a pacing slot opening after the deadline (its documented interval, or
+/// a `Retry-After` it was sent) fails at once as rate-limited without
+/// calling upstream, and that is receipted as a failed attempt. A call
+/// still running at the deadline, including one waiting for a connection
+/// whose release time is unknown, is cancelled and receipted as timed out.
+/// A receipt names the fingerprints of the evidence envelopes the
+/// provider's call produced; the bodies are not kept.
+///
+/// Only [`ProviderTier::Tier0Free`] and [`ProviderTier::Tier2SelfHosted`]
+/// providers are called. Every other tier is refused unconditionally,
+/// whatever the caller's [`crate::BudgetConstraint`] says: paid spend needs
+/// a durable ledger that can reserve and settle per attempt, which does not
+/// exist yet, and a Tier-0 miss never enables paid use. Under a freshness
+/// window with [`FreshnessPolicy::Strict`], a provider whose
+/// [`Provider::publication_time_capability`] is
+/// [`PublicationTimeCapability::Unsupported`] is refused too, since none of
+/// its hits could pass. A refused provider is not called and records
+/// nothing. Each attempt records the requests its provider reports sending
+/// ([`crate::ProviderAnswer::requests_sent`]) as free requests in
+/// [`ResearchResult::cost_spent`]; a timed-out attempt records none,
+/// because whether its request left is unknown.
 ///
 /// # Screening and merging
 ///
@@ -101,7 +111,11 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 ///    arXiv DOI and its journal DOI do not conflict.
 /// 2. Otherwise hits whose normalized titles (case-folded, punctuation
 ///    removed, whitespace collapsed) match merge only when both declare the
-///    same `year` and no identity disagrees.
+///    same `year`, share at least one normalized author family name, and
+///    no identity disagrees. A family name is the part of an `authors`
+///    entry before its first comma (`Alpha, A.`), or else its last word
+///    (`Alice Alpha`), ignoring a trailing `Jr`, `Sr`, `II`, `III`, or
+///    `IV`, normalized like a title.
 ///
 /// A merged hit keeps the first record's fields, adds any stable identity
 /// (`doi`, `arxiv_id`, `s2_paper_id`) it lacked from the records it
@@ -110,7 +124,8 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// absorbed record (provider, URL, title, metadata) under
 /// `merged_records`. Records that look alike but disagree (an identity
 /// conflict, or equal titles with different years) are both kept and name
-/// each other's URL under `conflicts_with`. Every hit names the provider
+/// each other's URL under `conflicts_with`; so are equal titles with equal
+/// years and no shared author family name. Every hit names the provider
 /// that surfaced it under `provider`. Hits are ordered by score, highest
 /// first, and cut to `max_results`; a short answer stays short.
 ///
@@ -122,16 +137,12 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// shape, and the JSON-serialized constraints with each domain list
 /// canonicalized, sorted, and deduplicated. Equal inputs give equal keys.
 /// The key covers only what the router is given; it is not the full query
-/// identity, which also carries consumer and scope identifiers.
+/// identity, which also carries consumer and scope identifiers. A result a
+/// provider returns directly carries the default shape and an empty cache
+/// key; the router fills in both, with the shape it routed.
 pub struct Router {
-    providers: Vec<Registered>,
+    providers: Vec<Arc<dyn Provider>>,
     attempt_timeout: Duration,
-}
-
-/// A registered provider and the pacer its attempts wait on.
-struct Registered {
-    provider: Arc<dyn Provider>,
-    pacer: Pacer,
 }
 
 impl fmt::Debug for Router {
@@ -142,7 +153,7 @@ impl fmt::Debug for Router {
                 &self
                     .providers
                     .iter()
-                    .map(|entry| entry.provider.name())
+                    .map(|provider| provider.name())
                     .collect::<Vec<_>>(),
             )
             .field("attempt_timeout", &self.attempt_timeout)
@@ -153,20 +164,28 @@ impl fmt::Debug for Router {
 impl Router {
     /// Register `providers`, whose order is the order every route tries
     /// them in, with `attempt_timeout` bounding each provider attempt,
-    /// pacing wait included.
+    /// pacing and connection waits included.
     ///
     /// # Errors
     ///
     /// [`crate::Error::InvalidConstraint`] with field `providers` when two
     /// providers share a name (receipts and cost lines are keyed by name,
     /// so they would be indistinguishable), and with field
-    /// `attempt_timeout` when it is zero.
+    /// `attempt_timeout` when it is zero or so long that a deadline that
+    /// far from now cannot be represented on the clock.
     pub fn new(providers: Vec<Arc<dyn Provider>>, attempt_timeout: Duration) -> Result<Self> {
         ensure!(
             !attempt_timeout.is_zero(),
             InvalidConstraintSnafu {
                 field: "attempt_timeout",
                 reason: "must be greater than zero",
+            }
+        );
+        ensure!(
+            Instant::now().checked_add(attempt_timeout).is_some(),
+            InvalidConstraintSnafu {
+                field: "attempt_timeout",
+                reason: "a deadline that far from now cannot be represented",
             }
         );
         let mut names = BTreeSet::new();
@@ -179,13 +198,6 @@ impl Router {
                 }
             );
         }
-        let providers = providers
-            .into_iter()
-            .map(|provider| Registered {
-                pacer: Pacer::new(provider.min_request_interval()),
-                provider,
-            })
-            .collect();
         Ok(Self {
             providers,
             attempt_timeout,
@@ -230,17 +242,23 @@ impl Router {
 
         let mut provenance = Vec::with_capacity(route.len());
         let mut collected = Collected::default();
-        for (index, entry) in route.into_iter().enumerate() {
+        for (index, provider) in route.into_iter().enumerate() {
             let (outcome, evidence_fingerprints) = self
-                .attempt(entry, query, constraints, &screen, &mut collected)
+                .attempt(
+                    provider.as_ref(),
+                    query,
+                    constraints,
+                    &screen,
+                    &mut collected,
+                )
                 .await?;
             let attempt = ProviderAttempt {
                 ordinal: u32::try_from(index).unwrap_or(u32::MAX),
-                tier: entry.provider.tier(),
+                tier: provider.tier(),
                 outcome,
                 evidence_fingerprints,
             };
-            provenance.push(ProvenanceEntry::attempt(entry.provider.name(), attempt));
+            provenance.push(ProvenanceEntry::attempt(provider.name(), attempt));
         }
 
         let hits = merge(collected.candidates, constraints.max_results);
@@ -254,39 +272,40 @@ impl Router {
     /// outcome and the fingerprints of the evidence the provider gathered.
     async fn attempt(
         &self,
-        entry: &Registered,
+        provider: &dyn Provider,
         query: &str,
         constraints: &SearchConstraints,
         screen: &Screen<'_>,
         collected: &mut Collected,
     ) -> Result<(AttemptOutcome, Vec<String>)> {
-        let provider = &entry.provider;
-        if provider.tier().is_paid() {
-            let refused = AttemptOutcome::Refused {
-                reason: RefusalReason::PaidRoutingUnavailable,
-            };
-            return Ok((refused, Vec::new()));
+        if let Some(reason) = refusal(provider, constraints) {
+            return Ok((AttemptOutcome::Refused { reason }, Vec::new()));
         }
-        let started = Instant::now();
-        let deadline = started.checked_add(self.attempt_timeout).unwrap_or(started);
-        if let Err(slot) = entry.pacer.claim(deadline).await {
-            let error = RateLimitedSnafu {
-                provider: provider.name(),
-                retry_after_ms: Some(millis(slot.opens_in)),
+        let call = provider.search(query, constraints);
+        let answer = match Instant::now().checked_add(self.attempt_timeout) {
+            Some(deadline) => {
+                let bounded = tokio::time::timeout_at(deadline, within_deadline(deadline, call));
+                let Ok(answer) = bounded.await else {
+                    let timed_out = AttemptOutcome::TimedOut {
+                        timeout_ms: saturating_millis(self.attempt_timeout),
+                    };
+                    return Ok((timed_out, Vec::new()));
+                };
+                answer
             }
-            .build();
-            return Ok((failed(&error), Vec::new()));
-        }
-        collected
-            .cost
-            .add(ProviderSpend::new(provider.name(), 0, 1, 1));
-        let call = provider.search_with_evidence(query, constraints);
-        let Ok(answer) = tokio::time::timeout_at(deadline, call).await else {
-            let timed_out = AttemptOutcome::TimedOut {
-                timeout_ms: millis(self.attempt_timeout),
-            };
-            return Ok((timed_out, Vec::new()));
+            // NOTE: `new` proved the deadline representable when the router
+            // was built; one that no longer is lies beyond any clock this
+            // process will read, so the call runs without a bound.
+            None => call.await,
         };
+        if answer.requests_sent > 0 {
+            collected.cost.add(ProviderSpend::new(
+                provider.name(),
+                0,
+                u64::from(answer.requests_sent),
+                answer.requests_sent,
+            ));
+        }
         let outcome = match answer.result {
             Ok(result) => {
                 collected.malformed_records = collected
@@ -295,26 +314,17 @@ impl Router {
                 screen.admit(provider.name(), result, &mut collected.candidates)
             }
             Err(e) if e.is_fatal() => return Err(e),
-            Err(e) => {
-                if let Error::RateLimited {
-                    retry_after_ms: Some(delay),
-                    ..
-                } = e
-                {
-                    entry.pacer.hold_for(Duration::from_millis(delay)).await;
-                }
-                failed(&e)
-            }
+            Err(e) => failed(&e),
         };
         Ok((outcome, answer.evidence_fingerprints))
     }
 
     /// Registered providers that declare `shape`, in registration order.
-    fn route(&self, shape: QueryShape) -> Result<Vec<&Registered>> {
-        let route: Vec<&Registered> = self
+    fn route(&self, shape: QueryShape) -> Result<Vec<&Arc<dyn Provider>>> {
+        let route: Vec<&Arc<dyn Provider>> = self
             .providers
             .iter()
-            .filter(|entry| entry.provider.query_shapes().contains(&shape))
+            .filter(|provider| provider.query_shapes().contains(&shape))
             .collect();
         ensure!(
             !route.is_empty(),
@@ -345,9 +355,19 @@ fn failed(error: &Error) -> AttemptOutcome {
     }
 }
 
-/// Whole milliseconds, saturating.
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+/// Why the router will not call `provider` under `constraints`, if it
+/// will not.
+fn refusal(provider: &dyn Provider, constraints: &SearchConstraints) -> Option<RefusalReason> {
+    match provider.tier() {
+        ProviderTier::Tier0Free | ProviderTier::Tier2SelfHosted => {}
+        // WHY: an allow-list, so a tier added later is refused until routing
+        // it is decided.
+        _ => return Some(RefusalReason::PaidRoutingUnavailable),
+    }
+    let strict_window = constraints.freshness_window.is_some()
+        && constraints.freshness_policy == FreshnessPolicy::Strict;
+    let undated = provider.publication_time_capability() == PublicationTimeCapability::Unsupported;
+    (strict_window && undated).then_some(RefusalReason::PublicationTimeUnsupported)
 }
 
 /// The caller's domain and freshness screens, parsed once per search.
@@ -536,17 +556,33 @@ struct Candidate {
     ids: Identity,
     title: String,
     year: Option<i64>,
+    families: BTreeSet<String>,
 }
 
 impl Candidate {
     fn new(provider: &'static str, hit: ResultHit) -> Self {
+        let families = hit
+            .metadata
+            .get(META_AUTHORS)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(family_name)
+            .collect();
         Self {
             provider,
             ids: Identity::of(&hit),
             title: title_key(&hit.title),
             year: hit.metadata.get(META_YEAR).and_then(Value::as_i64),
+            families,
             hit,
         }
+    }
+
+    /// Whether the two records name at least one author family in common.
+    fn shares_an_author(&self, other: &Self) -> bool {
+        !self.families.is_disjoint(&other.families)
     }
 }
 
@@ -564,12 +600,14 @@ impl Merged {
             hit: other_hit,
             ids,
             year,
+            families,
             ..
         } = other;
         self.first.ids.absorb(&ids);
         if self.first.year.is_none() {
             self.first.year = year;
         }
+        self.first.families.extend(families);
         let hit = &mut self.first.hit;
         for citation in other_hit.citations {
             if !hit.citations.contains(&citation) {
@@ -669,11 +707,16 @@ fn placement(merged: &[Merged], candidate: &Candidate) -> (Option<usize>, Vec<us
         return (target, conflicting);
     }
     for (i, record) in merged.iter().enumerate() {
-        if record.first.title != candidate.title {
+        let first = &record.first;
+        if first.title != candidate.title {
             continue;
         }
-        match (record.first.year, candidate.year) {
-            (Some(a), Some(b)) if a == b && !record.first.ids.conflicts(&candidate.ids) => {
+        match (first.year, candidate.year) {
+            (Some(a), Some(b))
+                if a == b
+                    && first.shares_an_author(candidate)
+                    && !first.ids.conflicts(&candidate.ids) =>
+            {
                 target = target.or(Some(i));
             }
             (Some(_), Some(_)) => conflicting.push(i),
@@ -700,6 +743,32 @@ fn mark_conflict(merged: &mut [Merged], a: usize, b: usize) {
     if let Some(record) = merged.get_mut(b) {
         record.note_conflict(&url_a);
     }
+}
+
+/// Name suffixes that follow a family name rather than being one.
+const NAME_SUFFIXES: [&str; 5] = ["jr", "sr", "ii", "iii", "iv"];
+
+/// An author's family name, normalized like a title: the part before the
+/// first comma (`Alpha, Alice`), or else the last word (`Alice Alpha`),
+/// with a trailing generational suffix skipped. `None` for a name with no
+/// letters or digits.
+fn family_name(author: &str) -> Option<String> {
+    let family = if let Some((family, _given)) = author.split_once(',') {
+        title_key(family)
+    } else {
+        let mut words = author
+            .split_whitespace()
+            .rev()
+            .map(title_key)
+            .filter(|word| !word.is_empty());
+        let last = words.next()?;
+        if NAME_SUFFIXES.contains(&last.as_str()) {
+            words.next().unwrap_or(last)
+        } else {
+            last
+        }
+    };
+    Some(family).filter(|family| !family.is_empty())
 }
 
 /// Case-folded title with punctuation removed and whitespace collapsed.
@@ -748,6 +817,21 @@ mod tests {
             "bert pre training of deep bidirectional transformers",
             "punctuation becomes a word break"
         );
+    }
+
+    #[test]
+    fn family_name_reads_both_name_orders_and_skips_suffixes() {
+        for (author, family) in [
+            ("Alice Alpha", Some("alpha")),
+            ("ALPHA, A.", Some("alpha")),
+            ("Martin Luther King Jr.", Some("king")),
+            ("Eli Stand-in", Some("stand in")),
+            ("Plato", Some("plato")),
+            ("  ", None),
+            ("-, A.", None),
+        ] {
+            assert_eq!(family_name(author).as_deref(), family, "{author:?}");
+        }
     }
 
     #[test]

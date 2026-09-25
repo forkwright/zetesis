@@ -12,13 +12,17 @@ TLS origins. Every file is one of three kinds:
   not show (a cut-off body, a missing required field, a renamed field).
 
 In documented-shape and synthetic files, every identifier, DOI, name, and
-title is invented for the fixture.
+title is invented for the fixture. The `search_hostile_*` files carry an
+instruction-shaped string (`IGNORE ALL PREVIOUS INSTRUCTIONS`) where a
+parser error would quote it, so the tests can show that no body text
+reaches an error message or an attempt receipt.
 
 Status-only conditions (rate limiting, authentication denial, server
 errors) are tested by status and headers; the tests pair them with a body
-that would otherwise parse, to show the status decides. Timeouts and
-transport failures are not fixtures here: `provider_wiring.rs` stages them
-with the offline origins and connectors in `crates/sylloge/tests/fixture/`.
+that would otherwise parse, to show the status decides. Timeouts,
+transport failures, pacing, and connection limits are not fixtures here:
+`provider_wiring.rs` and `provider_pacing.rs` stage them with the offline
+origins and connectors in `crates/sylloge/tests/fixture/`.
 
 ## semantic_scholar
 
@@ -40,6 +44,8 @@ read 2026-09-25.
 | `forbidden.json` | synthetic | HTTP 403 body |
 | `server_error.json` | synthetic | HTTP 500 body |
 | `duplicate_candidates.json` | synthetic | the Semantic Scholar side of the router's duplicate cases, including a paper known only by arXiv's DataCite DOI |
+| `search_hostile_type_changed.json` | synthetic | `year` arrives as an instruction-shaped string |
+| `search_hostile_malformed.json` | synthetic | an instruction-shaped bare word where a record belongs |
 
 ## arxiv
 
@@ -60,6 +66,8 @@ body, so no live Atom sample exists.
 | `not_atom.xml` | synthetic | an HTML document instead of a feed |
 | `api_error_documented.xml` | documented shape | the manual's error-feed example |
 | `duplicate_candidates.xml` | synthetic | the arXiv side of the router's duplicate cases, including a journal DOI for a paper Semantic Scholar knows by arXiv's DOI |
+| `search_hostile_mismatched_end.xml` | synthetic | a closing tag whose name is instruction-shaped |
+| `search_hostile_entity.xml` | synthetic | an attribute that references an undeclared, instruction-shaped entity |
 
 ## wikipedia
 
@@ -75,6 +83,8 @@ Documentation: `https://www.mediawiki.org/wiki/API:REST_API/Reference`
 | `search_malformed.json` | synthetic | body cut off mid-string |
 | `search_malformed_records.json` | synthetic | one page without `key` and one without `id`, between two complete pages |
 | `search_type_changed.json` | synthetic | a known field (`id`) arrives as a string |
+| `search_hostile_type_changed.json` | synthetic | `id` arrives as an instruction-shaped string |
+| `search_hostile_malformed.json` | synthetic | body cut off inside an instruction-shaped excerpt |
 
 The recorded Wikipedia body quotes search excerpts of the English Wikipedia
 articles "Transformer (deep learning)"
@@ -83,3 +93,14 @@ Is All You Need" (`https://en.wikipedia.org/wiki/Attention_Is_All_You_Need`).
 That text is by the articles' Wikipedia contributors, listed in each
 article's history, and is licensed under CC BY-SA 4.0
 (`https://creativecommons.org/licenses/by-sa/4.0/`); it is kept unmodified.
+
+## Live canary: not run
+
+Phase 03 S2 asks for a separately authorized live canary against the supported
+consumer query set; fixture success alone does not prove an endpoint still
+works. It has not been run. From the environment this cohort was built in,
+the arXiv query API answered HTTP 406 for every `Accept` value tried and
+Semantic Scholar answered HTTP 429, so neither could confirm the wired
+request. The canary needs a separately authorized run from a network where
+both endpoints answer, recorded by provider policy revision without
+retaining keys.

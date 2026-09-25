@@ -10,18 +10,19 @@ use url::Url;
 
 use super::{
     Endpoint, EndpointPolicy, HitParts, MEDIA_JSON, META_PAGEID, ParsedResponse, ProviderRequest,
-    RateLimit, accept_json, bounded_detail, check_status, collapse_whitespace, collect_records,
-    endpoint_url, malformed, required, result_limit, search_endpoint, validated_query,
+    RateLimit, accept_json, check_status, collapse_whitespace, collect_records, endpoint_url,
+    json_defect, malformed, required, result_limit, search_endpoint, validated_query,
 };
 use crate::acquisition::StaticAcquirer;
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
-use crate::error::{InvalidConstraintSnafu, Result};
+use crate::error::{InvalidConstraintSnafu, InvalidQuerySnafu, Result};
 use crate::evidence::html_text::decode_references;
 use crate::freshness::PublicationTime;
+use crate::pacing::Gate;
 use crate::provider::{BoxFut, Provider, ProviderAnswer};
 use crate::query::QueryShape;
-use crate::result::{ResearchResult, ResultHit};
+use crate::result::ResultHit;
 use crate::tier::ProviderTier;
 
 const PROVIDER: &str = "wikipedia";
@@ -51,10 +52,14 @@ const SPAN_CLOSE: &str = "</span>";
 /// Wikimedia's User-Agent policy requires an informative User-Agent with
 /// contact information and answers generic ones with HTTP 403, so the
 /// caller supplies it: zetesis never invents contact details.
+///
+/// An instance and its clones share one gate: every caller, routed or
+/// direct, holds to the documented pacing and connection limit together.
 #[derive(Debug, Clone)]
 pub struct Wikipedia {
     acquirer: Arc<StaticAcquirer>,
     user_agent: String,
+    gate: Arc<Gate>,
 }
 
 impl Wikipedia {
@@ -68,6 +73,7 @@ impl Wikipedia {
             "https://www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits",
             "https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy",
             "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
+            "https://www.mediawiki.org/wiki/Help:CirrusSearch",
         ],
         retrieved: jiff::civil::date(2026, 9, 25),
         authentication: "none; an informative User-Agent with contact information is required \
@@ -87,13 +93,21 @@ impl Wikipedia {
         query_shapes: &[QueryShape::QuickFactual, QueryShape::GeneralResearch],
         language_scope: "English Wikipedia only; `SearchConstraints::language` is ignored, \
             not mapped to another language edition",
+        query_syntax: "`q` takes CirrusSearch syntax, whose keywords (`insource:` with a \
+            regular expression, `intitle:`, `prefix:`, ...), namespace prefixes (`Talk:`), and \
+            main-namespace marker (a leading `:`) are each recognized by a colon; every colon \
+            in the query becomes a space, so none of them applies",
     };
 
     /// Search through `acquirer`, sending the caller's User-Agent (in place
     /// of the acquirer's) in the form the Wikimedia policy asks for:
     /// `<client>/<version> (<contact information>) <library>/<version>`.
-    /// Requests start at least 300 ms apart, the documented rate
-    /// ([`EndpointPolicy::rate_limit`]).
+    /// Every caller of this instance and its clones is held to the
+    /// documented terms: at most three connections at once
+    /// ([`EndpointPolicy::max_concurrent`]), requests starting at least
+    /// 300 ms apart ([`EndpointPolicy::rate_limit`]), and any
+    /// `Retry-After` the API sends. Separate instances do not share these
+    /// limits, so a process should search through one instance.
     ///
     /// # Errors
     ///
@@ -105,9 +119,14 @@ impl Wikipedia {
     pub fn new(acquirer: Arc<StaticAcquirer>, user_agent: impl Into<String>) -> Result<Self> {
         let user_agent = user_agent.into();
         check_user_agent(&user_agent)?;
+        let gate = Gate::new(
+            Self::POLICY.min_interval().unwrap_or(Duration::ZERO),
+            Self::POLICY.max_concurrent,
+        );
         Ok(Self {
             acquirer,
             user_agent,
+            gate: Arc::new(gate),
         })
     }
 
@@ -116,12 +135,25 @@ impl Wikipedia {
     /// Requests go to English Wikipedia; `constraints.language` is ignored
     /// rather than mapped to another language edition.
     ///
+    /// Every `:` becomes a space. `CirrusSearch` recognizes each of its
+    /// keywords (`insource:/regex/`, `intitle:`, `prefix:`, ...), each
+    /// namespace prefix (`Talk:`), and the main-namespace marker (a leading
+    /// `:`) by its colon, so query text, which may come from page content,
+    /// cannot issue any of them ([`EndpointPolicy::query_syntax`]).
+    ///
     /// # Errors
     ///
     /// [`crate::Error::InvalidQuery`] when the query has no searchable
-    /// text; [`crate::Error::InvalidConstraint`] when `max_results` is 0.
+    /// text once colons are removed; [`crate::Error::InvalidConstraint`]
+    /// when `max_results` is 0.
     pub fn request(&self, query: &str, constraints: &SearchConstraints) -> Result<ProviderRequest> {
-        let query = validated_query(PROVIDER, query)?;
+        let query = collapse_whitespace(&validated_query(PROVIDER, query)?.replace(':', " "));
+        snafu::ensure!(
+            !query.is_empty(),
+            InvalidQuerySnafu {
+                reason: format!("{PROVIDER}: query has no searchable text once colons are removed"),
+            }
+        );
         let limit = result_limit(constraints, MAX_LIMIT)?;
         let mut url = endpoint_url(&Self::POLICY)?;
         url.query_pairs_mut()
@@ -155,8 +187,8 @@ impl Wikipedia {
         accessed_at: Timestamp,
     ) -> Result<ParsedResponse> {
         check_status(PROVIDER, status, headers, accessed_at)?;
-        let response: SearchResponse = serde_json::from_slice(body)
-            .map_err(|e| malformed(PROVIDER, format!("JSON: {}", bounded_detail(e))))?;
+        let response: SearchResponse =
+            serde_json::from_slice(body).map_err(|e| json_defect(PROVIDER, &e))?;
         collect_records(response.pages, |page, rank| {
             page_hit(page, rank, accessed_at)
         })
@@ -176,19 +208,7 @@ impl Provider for Wikipedia {
         Self::POLICY.query_shapes
     }
 
-    fn min_request_interval(&self) -> Duration {
-        Self::POLICY.min_interval().unwrap_or(Duration::ZERO)
-    }
-
     fn search<'a>(
-        &'a self,
-        query: &'a str,
-        constraints: &'a SearchConstraints,
-    ) -> BoxFut<'a, Result<ResearchResult>> {
-        Box::pin(async move { self.search_with_evidence(query, constraints).await.result })
-    }
-
-    fn search_with_evidence<'a>(
         &'a self,
         query: &'a str,
         constraints: &'a SearchConstraints,
@@ -196,7 +216,9 @@ impl Provider for Wikipedia {
         let endpoint = Endpoint {
             provider: PROVIDER,
             media: MEDIA_JSON,
+            max_results: MAX_LIMIT,
             parse: Self::parse,
+            gate: &self.gate,
         };
         Box::pin(search_endpoint(
             &self.acquirer,
@@ -282,7 +304,6 @@ fn page_hit(page: Page, rank: usize, accessed_at: Timestamp) -> Result<Option<Re
         accessed_at,
     }
     .into_hit(&Wikipedia::POLICY, metadata)
-    .map(Some)
 }
 
 /// The article URL for a page `key`, the key percent-encoded as one path

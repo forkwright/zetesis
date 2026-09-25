@@ -21,6 +21,9 @@ const MALFORMED_RECORDS: &[u8] =
     include_bytes!("fixtures/providers/arxiv/search_malformed_records.xml");
 const NOT_ATOM: &[u8] = include_bytes!("fixtures/providers/arxiv/not_atom.xml");
 const API_ERROR: &[u8] = include_bytes!("fixtures/providers/arxiv/api_error_documented.xml");
+const HOSTILE_MISMATCHED_END: &[u8] =
+    include_bytes!("fixtures/providers/arxiv/search_hostile_mismatched_end.xml");
+const HOSTILE_ENTITY: &[u8] = include_bytes!("fixtures/providers/arxiv/search_hostile_entity.xml");
 
 fn accessed() -> Timestamp {
     "2026-09-25T18:00:00Z".parse().unwrap()
@@ -247,6 +250,121 @@ fn malformed_xml_is_a_provider_failure() {
 }
 
 #[test]
+fn hostile_text_in_a_malformed_feed_never_reaches_the_error() {
+    for (body, case) in [
+        (HOSTILE_MISMATCHED_END, "mismatched end tag"),
+        (HOSTILE_ENTITY, "unrecognized entity in an attribute"),
+    ] {
+        let err = Arxiv::parse(200, &[], body, accessed()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            matches!(err, Error::ProviderFailure { .. })
+                && message.contains("malformed response: XML at byte"),
+            "{case}: still a positioned XML defect: {message}"
+        );
+        assert!(
+            !message.contains("IGNORE") && !message.contains("INSTRUCTIONS"),
+            "{case}: no body text in the error: {message}"
+        );
+    }
+}
+
+#[test]
+fn request_encodes_reserved_characters_in_the_query() {
+    let request = Arxiv::request(
+        "a&b=c #d +e",
+        &SearchConstraints::new(3, BudgetConstraint::free_only()),
+    )
+    .unwrap();
+    assert_eq!(
+        request.url.as_str(),
+        "https://export.arxiv.org/api/query?search_query=all%3A%22a%26b%3Dc%22+AND+all%3A%22%23d%22\
+         +AND+all%3A%22%2Be%22&start=0&max_results=3&sortBy=relevance&sortOrder=descending",
+        "`&`, `=`, `#`, and `+` stay inside their quoted terms"
+    );
+}
+
+/// A feed of `entries`, each an `<entry>` body.
+fn feed(entries: &[&str]) -> Vec<u8> {
+    let mut xml = String::from(
+        r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns:x="http://example.org/markup">"#,
+    );
+    for entry in entries {
+        xml.push_str("<entry>");
+        xml.push_str(entry);
+        xml.push_str("</entry>");
+    }
+    xml.push_str("</feed>");
+    xml.into_bytes()
+}
+
+#[test]
+fn an_entry_whose_abstract_page_is_not_on_arxiv_or_disagrees_is_dropped() {
+    let body = feed(&[
+        "<id>http://evil.example/abs/2101.00001v1</id><title>Foreign id</title>",
+        r#"<id>http://arxiv.org/abs/2101.00002v1</id><title>Foreign link</title>
+           <link href="http://evil.example/abs/2101.00002v1" rel="alternate"/>"#,
+        r#"<id>http://arxiv.org/abs/2101.00003v1</id><title>Look-alike host</title>
+           <link href="http://arxiv.org.evil.example/abs/2101.00003v1" rel="alternate"/>"#,
+        r#"<id>http://arxiv.org/abs/2101.00004v1</id><title>Other paper</title>
+           <link href="http://arxiv.org/abs/2101.00099v1" rel="alternate"/>"#,
+        r#"<id>http://arxiv.org/abs/2101.00005v1</id><title>Script</title>
+           <link href="javascript:alert(1)" rel="alternate"/>"#,
+        r#"<id>http://arxiv.org/abs/2101.00006v1</id><title>Local file</title>
+           <link href="file:///etc/passwd" rel="alternate"/>"#,
+        r#"<id>http://arxiv.org/abs/2101.00007v2</id><title>Kept</title>
+           <link href="http://export.arxiv.org/abs/2101.00007v2" rel="alternate"/>"#,
+    ]);
+    let parsed = Arxiv::parse(200, &[], &body, accessed()).unwrap();
+    assert_eq!(
+        parsed
+            .hits
+            .iter()
+            .map(|hit| (hit.title.as_str(), hit.url.as_str()))
+            .collect::<Vec<_>>(),
+        [("Kept", "http://export.arxiv.org/abs/2101.00007v2")],
+        "an arxiv.org subdomain naming the same paper is kept"
+    );
+    assert_eq!(parsed.malformed_records, 6, "the other six are malformed");
+}
+
+#[test]
+fn attributes_and_nested_text_are_read_from_open_elements() {
+    let body = feed(&[r#"
+        <id>http://arxiv.org/abs/hep-ex/0307015</id>
+        <title>Alpha <x:b>Beta</x:b> Gamma</title>
+        <link href="http://arxiv.org/abs/hep-ex/0307015v1" rel="alternate" type="text/html"></link>
+        <category term="hep-ex" scheme="http://arxiv.org/schemas/atom"></category>
+        <arxiv:primary_category term="hep-ex"></arxiv:primary_category>"#]);
+    let hits = parse_ok(&body);
+    let hit = hits.first().unwrap();
+    assert_eq!(
+        hit.title, "Alpha Beta Gamma",
+        "text inside nested markup is kept, and whitespace collapses as elsewhere"
+    );
+    assert_eq!(
+        hit.url.as_str(),
+        "http://arxiv.org/abs/hep-ex/0307015v1",
+        "the alternate link written as an open element"
+    );
+    assert_eq!(
+        hit.metadata.get("arxiv_version"),
+        Some(&json!(1)),
+        "its version is read from that link"
+    );
+    assert_eq!(
+        hit.metadata.get("categories"),
+        Some(&json!(["hep-ex"])),
+        "a category written as an open element"
+    );
+    assert_eq!(
+        hit.metadata.get("primary_category"),
+        Some(&json!("hep-ex")),
+        "and the primary category"
+    );
+}
+
+#[test]
 fn truncated_feed_is_a_provider_failure() {
     let err = Arxiv::parse(200, &[], TRUNCATED, accessed()).unwrap_err();
     assert!(
@@ -383,8 +501,12 @@ fn policy_record_carries_the_documented_pacing() {
     );
     assert_eq!(policy.max_concurrent, Some(1), "one connection at a time");
     assert_eq!(
-        policy.revision,
-        format!("{}/{}", policy.provider, policy.retrieved),
+        policy.revision, "arxiv/2026-09-25",
         "the revision names the provider and retrieval date"
+    );
+    assert_eq!(
+        policy.retrieved,
+        jiff::civil::date(2026, 9, 25),
+        "the date the sources were read"
     );
 }

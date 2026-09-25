@@ -7,8 +7,9 @@
 //!
 //! # Traits
 //!
-//! - [`Provider`] — single-shot search. Returns a
-//!   [`crate::ResearchResult`] in one round trip.
+//! - [`Provider`] — single-shot search. One method returns a
+//!   [`ProviderAnswer`]: the [`crate::ResearchResult`] or error, the
+//!   evidence fingerprints behind it, and the requests it sent.
 //! - [`DeepResearch`] — multi-step research with async task lifecycle
 //!   (submit → poll → fetch).
 //! - [`Connector`] — the connection-binding seam [`StaticAcquirer`] opens
@@ -34,9 +35,10 @@
 //!
 //! [`Router`] sends a query to every registered provider that declares its
 //! [`QueryShape`], records one receipt per attempt in the result's
-//! provenance, refuses paid tiers, and merges the answers by stable
-//! identity; its documentation covers routes, receipts, screening,
-//! merging, and the cache key.
+//! provenance, refuses every tier but free and self-hosted, refuses a
+//! provider that cannot date its hits under a strict freshness window, and
+//! merges the answers by stable identity; its documentation covers routes,
+//! receipts, screening, merging, and the cache key.
 //!
 //! [`SemanticScholar`], [`Arxiv`], and [`Wikipedia`] are the first Tier-0
 //! cohort. Each has a pure request builder (`request`: query and
@@ -48,13 +50,24 @@
 //! request (its own `Accept` media type, a `User-Agent`, no credential),
 //! and the acquirer accepts only that media type, keeps the body as bytes
 //! without extracting text, and bounds the transfer as it does any other.
-//! [`Provider::search_with_evidence`] returns the envelope fingerprint
-//! beside the result, and the [`Router`] copies it onto the attempt's
-//! receipt ([`ProviderAttempt::evidence_fingerprints`]); the envelope and
-//! body are not kept. [`Provider::min_request_interval`] spaces a
-//! provider's attempts: arXiv's comes from its policy (3 s), Wikipedia's
-//! from its policy (300 ms), and Semantic Scholar's from the caller,
-//! because its shared anonymous pool documents no per-client rate. All
+//! The caller's domain deny list applies to the provider's own API host
+//! too; the allow list, which scopes results, screens only hits. Each
+//! answer carries the envelope fingerprint, and the [`Router`] copies it
+//! onto the attempt's receipt ([`ProviderAttempt::evidence_fingerprints`]);
+//! the envelope and body are not kept. A provider keeps at most the
+//! requested number of hits, in its rank order. A result a provider
+//! returns directly carries the default shape and an empty cache key; the
+//! router fills in both.
+//!
+//! Pacing belongs to each provider instance and its clones, whoever calls
+//! it: arXiv holds one connection at a time with requests three seconds
+//! apart, Wikipedia at most three connections with requests 300 ms apart,
+//! and Semantic Scholar the interval its caller chose, since its shared
+//! anonymous pool documents no per-client rate. A `Retry-After` the
+//! provider is sent holds every caller of the instance. The request is
+//! built before any wait, so a query the builder refuses spends neither a
+//! pacing slot nor a request. Each request builder keeps query text out of
+//! its endpoint's query syntax ([`EndpointPolicy::query_syntax`]). All
 //! three serve one language scope and ignore [`SearchConstraints::language`]
 //! ([`EndpointPolicy::language_scope`]).
 //!
@@ -76,8 +89,10 @@
 //! The status decides: a result-shaped body under an error status is still
 //! the error, and an error status is mapped even when the acquirer refused
 //! its body (an error page in another media type). Error messages name the
-//! status and the defect and never quote free text from the response body,
-//! so upstream text cannot reach a caller through the error channel.
+//! status and the defect and never quote text from the response body: a
+//! JSON defect is named by its kind and line and column, an XML defect by
+//! its kind and byte position, so upstream text cannot reach a caller or
+//! an attempt receipt through the error channel.
 //!
 //! When the acquisition itself fails, no status decides and the failure
 //! keeps its class ([`AcquisitionFailure::class`]):
@@ -94,7 +109,10 @@
 //! caller-supplied access time. Its `confidence`, and the hit's `score`, is
 //! the reciprocal of the hit's 1-based rank in the provider's answer (1.0,
 //! 0.5, 0.33, ...): none of the three endpoints returns a relevance score,
-//! so rank is the only relevance signal they give. `content_type` stays
+//! so rank is the only relevance signal they give. A hit URL is always
+//! `http` or `https` with a host; a record whose URL is not is dropped as
+//! malformed, and an arXiv entry's abstract page must be on `arxiv.org`
+//! (or a subdomain) and agree with its `<id>`. `content_type` stays
 //! `None` because the provider returned metadata about the source, not the
 //! source payload. A Wikipedia excerpt loses its search-highlight markup
 //! and then has its character references decoded, with the same decoder

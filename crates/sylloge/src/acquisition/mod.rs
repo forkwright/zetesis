@@ -139,6 +139,7 @@ pub use self::connector::{
     ConnectDeniedSnafu, ConnectError, ConnectIoSnafu, ConnectTimedOutSnafu, ConnectedStream,
     Connector, DirectConnector,
 };
+pub(crate) use self::limits::saturating_millis;
 pub use self::limits::{AcquisitionLimits, DowngradePolicy, SchemePolicy};
 pub use self::record::{
     AcquisitionFailure, ConnectAttempt, ConnectOutcome, HopRecord, ResponseRecord, TlsRecord,

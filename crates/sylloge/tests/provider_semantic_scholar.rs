@@ -20,6 +20,10 @@ const SCHEMA_CHANGED: &[u8] =
     include_bytes!("fixtures/providers/semantic_scholar/search_schema_changed.json");
 const TYPE_CHANGED: &[u8] =
     include_bytes!("fixtures/providers/semantic_scholar/search_type_changed.json");
+const HOSTILE_TYPE_CHANGED: &[u8] =
+    include_bytes!("fixtures/providers/semantic_scholar/search_hostile_type_changed.json");
+const HOSTILE_MALFORMED: &[u8] =
+    include_bytes!("fixtures/providers/semantic_scholar/search_hostile_malformed.json");
 const MALFORMED: &[u8] =
     include_bytes!("fixtures/providers/semantic_scholar/search_malformed.json");
 const MALFORMED_RECORDS: &[u8] =
@@ -308,6 +312,30 @@ fn type_change_in_a_known_field_is_a_malformed_response() {
         err.to_string().contains("malformed response: JSON"),
         "the message names the defect: {err}"
     );
+    assert!(
+        !err.to_string().contains("2021"),
+        "the offending value is not quoted: {err}"
+    );
+}
+
+#[test]
+fn hostile_text_in_a_type_changed_or_malformed_body_never_reaches_the_error() {
+    for (body, case) in [
+        (HOSTILE_TYPE_CHANGED, "type-changed"),
+        (HOSTILE_MALFORMED, "malformed"),
+    ] {
+        let err = SemanticScholar::parse(200, &[], body, accessed()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            matches!(err, Error::ProviderFailure { .. })
+                && message.contains("malformed response: JSON"),
+            "{case}: still a named JSON defect: {message}"
+        );
+        assert!(
+            !message.contains("IGNORE") && !message.contains("INSTRUCTIONS"),
+            "{case}: no body text in the error: {message}"
+        );
+    }
 }
 
 #[test]
@@ -401,6 +429,46 @@ fn documented_bad_request_is_an_invalid_query() {
 }
 
 #[test]
+fn request_encodes_reserved_characters_in_the_query() {
+    let request = SemanticScholar::request(
+        "a&b=c #d +e",
+        &SearchConstraints::new(3, BudgetConstraint::free_only()),
+    )
+    .unwrap();
+    assert_eq!(
+        request.url.as_str(),
+        "https://api.semanticscholar.org/graph/v1/paper/search?query=a%26b%3Dc+%23d+%2Be&limit=3\
+         &fields=paperId%2CcorpusId%2CexternalIds%2Curl%2Ctitle%2Cabstract%2Cvenue%2Cyear\
+         %2CpublicationDate%2CpublicationTypes%2Cauthors",
+        "`&`, `=`, `#`, and `+` stay inside the one query parameter"
+    );
+}
+
+#[test]
+fn a_paper_url_that_is_not_http_with_a_host_drops_the_record() {
+    let body = br#"{"data":[
+        {"paperId":"p1","title":"Script","url":"javascript:alert(1)"},
+        {"paperId":"p2","title":"Local file","url":"file:///etc/passwd"},
+        {"paperId":"p3","title":"No host","url":"data:text/html,hello"},
+        {"paperId":"p4","title":"Kept","url":"https://www.semanticscholar.org/paper/p4"}
+    ]}"#;
+    let parsed = SemanticScholar::parse(200, &[], body, accessed()).unwrap();
+    assert_eq!(
+        parsed
+            .hits
+            .iter()
+            .map(|hit| hit.url.as_str())
+            .collect::<Vec<_>>(),
+        ["https://www.semanticscholar.org/paper/p4"],
+        "only an http(s) URL with a host becomes a hit"
+    );
+    assert_eq!(
+        parsed.malformed_records, 3,
+        "the other three are malformed records"
+    );
+}
+
+#[test]
 fn server_error_is_a_transient_provider_failure() {
     let err = SemanticScholar::parse(500, &[], SERVER_ERROR, accessed()).unwrap_err();
     assert!(
@@ -423,9 +491,13 @@ fn policy_record_matches_the_documented_endpoint() {
     let policy = SemanticScholar::POLICY;
     assert_eq!(policy.provider, "semantic_scholar");
     assert_eq!(
-        policy.revision,
-        format!("{}/{}", policy.provider, policy.retrieved),
+        policy.revision, "semantic_scholar/2026-09-25",
         "the revision names the provider and retrieval date"
+    );
+    assert_eq!(
+        policy.retrieved,
+        jiff::civil::date(2026, 9, 25),
+        "the date the sources were read"
     );
     assert_eq!(policy.rate_limit, None, "no per-client limit is documented");
     assert_eq!(policy.license, "attribution: Semantic Scholar");

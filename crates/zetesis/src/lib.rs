@@ -216,13 +216,9 @@ mod tests {
             &wikipedia,
         ];
         assert_eq!(
-            cohort.map(Provider::min_request_interval),
-            [
-                std::time::Duration::ZERO,
-                std::time::Duration::from_secs(3),
-                std::time::Duration::from_millis(300),
-            ],
-            "each provider paces at its policy's interval, Semantic Scholar at the caller's"
+            cohort.map(Provider::name),
+            ["semantic_scholar", "arxiv", "wikipedia"],
+            "the cohort implements the provider trait through the facade"
         );
         assert!(
             requests.iter().all(|r| r.url.scheme() == "https"),
@@ -258,9 +254,10 @@ mod tests {
             EvidenceState::Unanswered,
             "evidence state is reachable through the facade"
         );
-        let answer = ProviderAnswer::from(Ok(empty));
-        assert!(
-            answer.evidence_fingerprints.is_empty(),
+        let answer = ProviderAnswer::new(Ok(empty), vec!["sha256:00".to_owned()], 1);
+        assert_eq!(
+            (answer.evidence_fingerprints, answer.requests_sent),
+            (vec!["sha256:00".to_owned()], 1),
             "a provider answer is reachable through the facade"
         );
 

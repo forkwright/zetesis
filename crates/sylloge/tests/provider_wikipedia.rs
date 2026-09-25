@@ -26,6 +26,10 @@ const MALFORMED: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_mal
 const MALFORMED_RECORDS: &[u8] =
     include_bytes!("fixtures/providers/wikipedia/search_malformed_records.json");
 const TYPE_CHANGED: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_type_changed.json");
+const HOSTILE_TYPE_CHANGED: &[u8] =
+    include_bytes!("fixtures/providers/wikipedia/search_hostile_type_changed.json");
+const HOSTILE_MALFORMED: &[u8] =
+    include_bytes!("fixtures/providers/wikipedia/search_hostile_malformed.json");
 
 const USER_AGENT: &str = "zetesis-fixture/0.0 (https://example.org/contact) sylloge/0.0";
 
@@ -76,6 +80,55 @@ fn request_sends_the_callers_user_agent_to_the_per_wiki_endpoint() {
             ("user-agent", USER_AGENT.to_owned()),
         ],
         "the User-Agent is exactly the caller's"
+    );
+}
+
+fn request_url(query: &str) -> String {
+    Wikipedia::new(offline_acquirer(), USER_AGENT)
+        .unwrap()
+        .request(
+            query,
+            &SearchConstraints::new(3, BudgetConstraint::free_only()),
+        )
+        .unwrap()
+        .url
+        .to_string()
+}
+
+#[test]
+fn request_encodes_reserved_characters_in_the_query() {
+    assert_eq!(
+        request_url("a&b=c #d +e"),
+        "https://en.wikipedia.org/w/rest.php/v1/search/page?q=a%26b%3Dc+%23d+%2Be&limit=3",
+        "`&`, `=`, `#`, and `+` stay inside the one query parameter"
+    );
+}
+
+#[test]
+fn request_neutralizes_search_keywords_and_namespace_prefixes() {
+    for (query, expected_q) in [
+        ("insource:/secret.*key/", "insource+%2Fsecret.*key%2F"),
+        ("intitle:Foo incategory: Bar", "intitle+Foo+incategory+Bar"),
+        ("Talk:Main Page", "Talk+Main+Page"),
+        (":main namespace", "main+namespace"),
+        ("prefix:Special:Export", "prefix+Special+Export"),
+    ] {
+        assert_eq!(
+            request_url(query),
+            format!("https://en.wikipedia.org/w/rest.php/v1/search/page?q={expected_q}&limit=3"),
+            "{query:?}: every colon is a word break, so no keyword or namespace applies"
+        );
+    }
+    let err = Wikipedia::new(offline_acquirer(), USER_AGENT)
+        .unwrap()
+        .request(
+            " : :: ",
+            &SearchConstraints::new(3, BudgetConstraint::free_only()),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidQuery { .. }),
+        "a query of only colons has no searchable text: {err:?}"
     );
 }
 
@@ -247,6 +300,30 @@ fn type_change_in_a_known_field_is_a_malformed_response() {
         err.to_string().contains("malformed response: JSON"),
         "the message names the defect: {err}"
     );
+    assert!(
+        !err.to_string().contains("1000009"),
+        "the offending value is not quoted: {err}"
+    );
+}
+
+#[test]
+fn hostile_text_in_a_type_changed_or_malformed_body_never_reaches_the_error() {
+    for (body, case) in [
+        (HOSTILE_TYPE_CHANGED, "type-changed"),
+        (HOSTILE_MALFORMED, "malformed"),
+    ] {
+        let err = Wikipedia::parse(200, &[], body, accessed()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            matches!(err, Error::ProviderFailure { .. })
+                && message.contains("malformed response: JSON"),
+            "{case}: still a named JSON defect: {message}"
+        );
+        assert!(
+            !message.contains("IGNORE") && !message.contains("INSTRUCTIONS"),
+            "{case}: no body text in the error: {message}"
+        );
+    }
 }
 
 #[test]
@@ -354,4 +431,8 @@ fn policy_record_carries_the_documented_pacing() {
     );
     assert_eq!(policy.max_concurrent, Some(3), "at most three concurrent");
     assert_eq!(policy.license, "CC-BY-SA-4.0");
+    assert_eq!(
+        policy.revision, "wikipedia/2026-09-25",
+        "the revision names the provider and retrieval date"
+    );
 }

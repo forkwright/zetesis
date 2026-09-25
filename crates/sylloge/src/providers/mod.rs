@@ -16,6 +16,12 @@
 //! bytes and no text is extracted from it. The envelope's fingerprint
 //! travels with the answer as the evidence behind it; the envelope and
 //! body are not kept.
+//!
+//! Each provider instance owns a [`Gate`] that its clones share: the
+//! documented connection limit and request interval, and any
+//! `Retry-After` the provider is sent, apply to every caller of the
+//! instance. The request is built before the gate is entered, so a query
+//! the builder refuses spends neither a slot nor a request.
 
 mod arxiv;
 mod semantic_scholar;
@@ -27,9 +33,12 @@ use std::time::Duration;
 use jiff::Timestamp;
 use jiff::civil::Date;
 use serde_json::Value;
+use serde_json::error::Category;
 use url::Url;
 
-use crate::acquisition::{AcquisitionFailure, RequestProfile, StaticAcquirer};
+use crate::acquisition::{
+    AcquisitionFailure, ConnectOutcome, RequestProfile, StaticAcquirer, saturating_millis,
+};
 use crate::citation::{Citation, SourceKind};
 use crate::constraints::SearchConstraints;
 use crate::cost::{CostTracking, ProviderSpend};
@@ -40,6 +49,7 @@ use crate::error::{
 };
 use crate::evidence::envelope::EvidenceEnvelope;
 use crate::freshness::PublicationTime;
+use crate::pacing::Gate;
 use crate::provider::ProviderAnswer;
 use crate::query::QueryShape;
 use crate::result::{ResearchResult, ResultHit};
@@ -91,10 +101,6 @@ const STATUS_TOO_MANY_REQUESTS: u16 = 429;
 const STATUS_SERVICE_UNAVAILABLE: u16 = 503;
 const CLIENT_ERRORS: std::ops::RangeInclusive<u16> = 400..=499;
 
-/// Longest parser-error detail carried into an error message, in
-/// characters.
-const MAX_DETAIL_CHARS: usize = 200;
-
 /// Documented upstream policy for one provider endpoint.
 ///
 /// Every value comes from the provider's official documentation as read on
@@ -134,6 +140,10 @@ pub struct EndpointPolicy {
     /// Language scope of the endpoint as used here, and whether the
     /// request builder applies [`SearchConstraints::language`].
     pub language_scope: &'static str,
+    /// The endpoint's query syntax, and the rule the request builder
+    /// applies so that query text (which may come from page content) is
+    /// searched as plain terms and cannot reach that syntax.
+    pub query_syntax: &'static str,
 }
 
 impl EndpointPolicy {
@@ -190,71 +200,117 @@ pub(crate) type Parse = fn(u16, &[(&str, &str)], &[u8], Timestamp) -> Result<Par
 
 /// What a provider's fetch needs besides the request.
 #[derive(Clone, Copy)]
-pub(crate) struct Endpoint {
+pub(crate) struct Endpoint<'p> {
     /// Provider identifier, for errors and the cost line.
     pub(crate) provider: &'static str,
     /// The data media type requested and accepted.
     pub(crate) media: &'static str,
+    /// The endpoint's documented per-request maximum, which caps the
+    /// requested limit as the request builder capped it.
+    pub(crate) max_results: usize,
     /// The provider's parser.
     pub(crate) parse: Parse,
+    /// The provider instance's pacing and connection limit.
+    pub(crate) gate: &'p Gate,
 }
 
 /// Build, fetch, and parse one provider search.
 ///
-/// The caller's domain lists are not applied to the provider's own
-/// endpoint (see the WHY below); the network-target policy is.
+/// The request is built before anything is claimed, so a query the
+/// builder refuses spends no pacing slot and sends nothing. The call then
+/// waits at the instance's [`Gate`], fetches through the acquirer, and
+/// hands the recorded response to the parser; a `Retry-After` in the
+/// answer holds the gate for every caller of the instance. At most the
+/// requested number of hits is kept, in the provider's rank order.
 pub(crate) async fn search_endpoint(
     acquirer: &StaticAcquirer,
-    endpoint: Endpoint,
+    endpoint: Endpoint<'_>,
     request: Result<ProviderRequest>,
     query: &str,
     constraints: &SearchConstraints,
 ) -> ProviderAnswer {
-    let fetched = async {
-        let request = request?;
-        let profile = RequestProfile::data(endpoint.media, header_value(&request, "user-agent"))?;
-        // WHY: the caller's domain allow and deny lists say which hits a
-        // search may return, so the router screens hit URLs with them. The
-        // provider's own API host is not a hit; screening it would refuse
-        // every search whose allow list names only result domains. Every
-        // other part of the network-target policy still applies to it.
-        let mut endpoint_constraints = constraints.clone();
-        endpoint_constraints.domain_allowlist = None;
-        endpoint_constraints.domain_denylist = None;
-        acquirer
-            .acquire_with(&request.url, &endpoint_constraints, None, &profile)
-            .await
+    let prepared = request.and_then(|request| {
+        let profile = RequestProfile::data(endpoint.media, header(&request.headers, "user-agent"))?;
+        let limit = result_limit(constraints, endpoint.max_results)?;
+        Ok((request, profile, limit))
+    });
+    let (request, profile, limit) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return ProviderAnswer::new(Err(error), Vec::new(), 0),
     };
-    let acquisition = match fetched.await {
+    let pass = match endpoint.gate.enter().await {
+        Ok(pass) => pass,
+        Err(slot) => {
+            let error = RateLimitedSnafu {
+                provider: endpoint.provider,
+                retry_after_ms: Some(saturating_millis(slot.opens_in)),
+            }
+            .build();
+            return ProviderAnswer::new(Err(error), Vec::new(), 0);
+        }
+    };
+    // WHY: the caller's allow list says which hits a search may return, and
+    // the router screens hit URLs with it; the provider's own API host is
+    // not a hit, so screening it would refuse every search whose allow list
+    // names only result domains. The deny list is different: a caller that
+    // denies a domain never has zetesis contact it, as a hit or as an API
+    // host, so it applies here with the rest of the network-target policy.
+    let mut endpoint_constraints = constraints.clone();
+    endpoint_constraints.domain_allowlist = None;
+    let fetched = acquirer
+        .acquire_with(&request.url, &endpoint_constraints, None, &profile)
+        .await;
+    drop(pass);
+    let acquisition = match fetched {
         Ok(acquisition) => acquisition,
-        Err(error) => return ProviderAnswer::from(Err(error)),
+        Err(error) => return ProviderAnswer::new(Err(error), Vec::new(), 0),
     };
     let envelope = acquisition.envelope();
+    let sent = requests_sent(envelope);
     let result = parse_envelope(endpoint, envelope, acquisition.body()).map(|parsed| {
+        let mut hits = parsed.hits;
+        hits.truncate(limit);
         let mut result = ResearchResult::new(
             query,
             QueryShape::default(),
-            parsed.hits,
+            hits,
             Vec::new(),
-            CostTracking::from_line_items([ProviderSpend::new(endpoint.provider, 0, 1, 1)]),
+            CostTracking::from_line_items([ProviderSpend::new(
+                endpoint.provider,
+                0,
+                u64::from(sent),
+                sent,
+            )]),
             "",
         );
         result.malformed_records = parsed.malformed_records;
         result
     });
-    ProviderAnswer {
-        result,
-        evidence_fingerprints: vec![envelope.fingerprint().to_owned()],
+    if let Err(Error::RateLimited {
+        retry_after_ms: Some(delay),
+        ..
+    }) = &result
+    {
+        endpoint.gate.hold_for(Duration::from_millis(*delay)).await;
     }
+    ProviderAnswer::new(result, vec![envelope.fingerprint().to_owned()], sent)
 }
 
-/// The value of request header `name`, if the request carries it.
-fn header_value<'r>(request: &'r ProviderRequest, name: &str) -> Option<&'r str> {
-    request
-        .headers
+/// Requests an acquisition put on the wire: one per hop that got past its
+/// connection and, for `https`, its TLS handshake.
+fn requests_sent(envelope: &EvidenceEnvelope) -> u32 {
+    let sent = envelope
+        .hops()
         .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_str())
+        .filter(|hop| {
+            let connected = hop
+                .connect_attempts()
+                .iter()
+                .any(|attempt| attempt.result() == ConnectOutcome::Connected);
+            connected && (hop.url().scheme() != "https" || hop.tls().is_some())
+        })
+        .count();
+    u32::try_from(sent).unwrap_or(u32::MAX)
 }
 
 /// Hand a recorded response to the parser, or map the acquisition failure.
@@ -264,7 +320,7 @@ fn header_value<'r>(request: &'r ProviderRequest, name: &str) -> Option<&'r str>
 /// page in another media type): the parser maps the status. A failure after
 /// a successful head, or before any head, is the acquisition's own.
 fn parse_envelope(
-    endpoint: Endpoint,
+    endpoint: Endpoint<'_>,
     envelope: &EvidenceEnvelope,
     body: &[u8],
 ) -> Result<ParsedResponse> {
@@ -318,11 +374,18 @@ pub(crate) struct HitParts {
 
 impl HitParts {
     /// Build the cited hit, stamping the policy revision and licence.
+    /// `None`, a malformed record, when the URL is not `http` or `https`
+    /// with a host: a hit URL is something a caller may fetch or show as a
+    /// link, so a `javascript:`, `file:`, or host-less URL never becomes
+    /// one.
     pub(crate) fn into_hit(
         self,
         policy: &EndpointPolicy,
         metadata: Vec<(&'static str, Value)>,
-    ) -> Result<ResultHit> {
+    ) -> Result<Option<ResultHit>> {
+        if !matches!(self.url.scheme(), "http" | "https") || self.url.host().is_none() {
+            return Ok(None);
+        }
         let confidence = rank_confidence(self.rank);
         let citation = Citation::new(
             self.url.clone(),
@@ -344,7 +407,7 @@ impl HitParts {
         for (key, value) in metadata {
             hit = hit.with_metadata(key, value);
         }
-        Ok(hit)
+        Ok(Some(hit))
     }
 }
 
@@ -406,24 +469,24 @@ pub(crate) fn check_status(
     headers: &[(&str, &str)],
     accessed_at: Timestamp,
 ) -> Result<()> {
-    let error = match status {
-        STATUS_OK => return Ok(()),
-        STATUS_TOO_MANY_REQUESTS => RateLimitedSnafu {
+    if status == STATUS_OK {
+        return Ok(());
+    }
+    let retry_after = retry_after_ms(headers, accessed_at);
+    let rate_limited = || {
+        RateLimitedSnafu {
             provider,
-            retry_after_ms: retry_after_ms(headers, accessed_at),
+            retry_after_ms: retry_after,
         }
-        .build(),
+        .build()
+    };
+    let error = match status {
+        STATUS_TOO_MANY_REQUESTS => rate_limited(),
         // WHY: a 503 that carries `Retry-After` names how long the service
         // expects to be unavailable (RFC 9110 section 10.2.3), and Wikimedia
         // documents 503 with `Retry-After` as a rate-limit answer; either way
         // the caller must hold off that long before asking again.
-        STATUS_SERVICE_UNAVAILABLE if retry_after_ms(headers, accessed_at).is_some() => {
-            RateLimitedSnafu {
-                provider,
-                retry_after_ms: retry_after_ms(headers, accessed_at),
-            }
-            .build()
-        }
+        STATUS_SERVICE_UNAVAILABLE if retry_after.is_some() => rate_limited(),
         STATUS_UNAUTHORIZED | STATUS_FORBIDDEN => UnauthorizedSnafu {
             provider,
             message: format!("HTTP {status}"),
@@ -455,13 +518,25 @@ pub(crate) fn malformed(provider: &str, detail: impl Display) -> Error {
     .build()
 }
 
-/// A bounded rendering of a parser error, for [`malformed`].
-pub(crate) fn bounded_detail(detail: impl Display) -> String {
-    let text = detail.to_string();
-    match text.char_indices().nth(MAX_DETAIL_CHARS) {
-        Some((cut, _)) => format!("{}...", text.get(..cut).unwrap_or_default()),
-        None => text,
-    }
+/// A `ProviderFailure` for a JSON body that does not parse, named by the
+/// kind of defect and its position only. `serde_json`'s own message quotes
+/// the offending value, which is text the origin sent, so it never reaches
+/// an error.
+pub(crate) fn json_defect(provider: &str, error: &serde_json::Error) -> Error {
+    let kind = match error.classify() {
+        Category::Io => "read",
+        Category::Syntax => "syntax",
+        Category::Data => "data",
+        Category::Eof => "end-of-input",
+    };
+    malformed(
+        provider,
+        format!(
+            "JSON {kind} error at line {} column {}",
+            error.line(),
+            error.column()
+        ),
+    )
 }
 
 /// A required per-record string, whitespace collapsed; `None` when absent
@@ -492,12 +567,16 @@ pub(crate) fn collect_records<R>(
     })
 }
 
-/// Case-insensitive header lookup.
-fn header<'h>(headers: &[(&str, &'h str)], name: &str) -> Option<&'h str> {
+/// Case-insensitive lookup of header `name` among `(name, value)` pairs.
+pub(crate) fn header<'h, N, V>(headers: &'h [(N, V)], name: &str) -> Option<&'h str>
+where
+    N: AsRef<str>,
+    V: AsRef<str>,
+{
     headers
         .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, v)| *v)
+        .find(|(n, _)| n.as_ref().eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_ref())
 }
 
 /// `Retry-After` as milliseconds from `accessed_at`, in any form
@@ -505,7 +584,7 @@ fn header<'h>(headers: &[(&str, &'h str)], name: &str) -> Option<&'h str> {
 /// which tells the caller to back off on its own schedule.
 fn retry_after_ms(headers: &[(&str, &str)], accessed_at: Timestamp) -> Option<u64> {
     let delay = crate::pacing::retry_after(header(headers, "retry-after")?, accessed_at)?;
-    Some(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX))
+    Some(saturating_millis(delay))
 }
 
 /// Trim and collapse every whitespace run to one space.
@@ -779,14 +858,52 @@ mod tests {
     }
 
     #[test]
-    fn bounded_detail_truncates_long_text() {
-        let long = "x".repeat(MAX_DETAIL_CHARS + 10);
-        let detail = bounded_detail(&long);
+    fn json_defect_names_the_kind_and_position_only() {
+        let err = serde_json::from_slice::<u64>(br#""secret value""#).unwrap_err();
         assert_eq!(
-            detail.chars().count(),
-            MAX_DETAIL_CHARS + 3,
-            "cut to the bound plus an ellipsis"
+            json_defect("p", &err).to_string(),
+            "provider 'p' failed: malformed response: JSON data error at line 1 column 14",
+            "the kind and position, never the value"
         );
-        assert_eq!(bounded_detail("short"), "short", "short text is unchanged");
+        let err = serde_json::from_slice::<Vec<u64>>(b"[1,").unwrap_err();
+        assert_eq!(
+            json_defect("p", &err).to_string(),
+            "provider 'p' failed: malformed response: JSON end-of-input error at line 1 column 3",
+            "a cut-off body"
+        );
+    }
+
+    #[test]
+    fn a_hit_url_must_be_http_with_a_host() {
+        let parts = |url: &str| HitParts {
+            title: "t".to_owned(),
+            snippet: String::new(),
+            url: Url::parse(url).unwrap(),
+            published_at: PublicationTime::Unknown,
+            source_kind: SourceKind::Web,
+            rank: 0,
+            accessed_at: ts("2026-09-25T18:00:00Z"),
+        };
+        for url in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/plain,hello",
+            "mailto:alice@example.org",
+        ] {
+            assert_eq!(
+                parts(url).into_hit(&Arxiv::POLICY, Vec::new()).unwrap(),
+                None,
+                "{url:?} never becomes a hit"
+            );
+        }
+        for url in ["http://example.org/a", "https://example.org/b"] {
+            assert!(
+                parts(url)
+                    .into_hit(&Arxiv::POLICY, Vec::new())
+                    .unwrap()
+                    .is_some(),
+                "{url:?} does"
+            );
+        }
     }
 }

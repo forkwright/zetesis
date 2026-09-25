@@ -371,12 +371,12 @@ fn whole_millis(name: &str, duration: Duration) -> Result<u64> {
     Ok(millis)
 }
 
-/// `duration` in whole milliseconds.
+/// `duration` in whole milliseconds, saturating at `u64::MAX`.
 ///
-/// INVARIANT: every `AcquisitionLimits` passed `validated`, which proved
-/// both durations are whole milliseconds that fit in `u64`, so the
-/// saturating fallback is unreachable for them.
-fn saturating_millis(duration: Duration) -> u64 {
+/// NOTE: for an `AcquisitionLimits` duration the saturation is
+/// unreachable: `validated` proved both durations are whole milliseconds
+/// that fit in `u64`.
+pub(crate) fn saturating_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 

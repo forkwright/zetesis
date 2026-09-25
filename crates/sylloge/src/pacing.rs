@@ -1,19 +1,28 @@
-//! Per-provider request pacing and `Retry-After` interpretation.
+//! Per-provider-instance request pacing, concurrency, and `Retry-After`
+//! interpretation.
 //!
-//! A [`Pacer`] spaces one provider's requests by a minimum interval and
-//! holds them off after the provider answers with `Retry-After`, on the
-//! tokio clock. A claim that would have to wait past the caller's deadline
-//! fails at once instead of sleeping, so a paced attempt never outlives its
-//! deadline. [`retry_after`] reads the header in both forms RFC 9110
-//! section 10.2.3 allows: delay-seconds, and an HTTP-date in any of the
-//! three formats section 5.6.7 requires recipients to accept.
+//! A [`Gate`] belongs to one provider instance and every clone of it. It
+//! holds the instance to its documented connection limit (a semaphore) and
+//! request interval (a [`Pacer`]), and a `Retry-After` the provider is sent
+//! holds the same pacer, so the limits apply to every caller of the
+//! instance, routed or direct. The pacer runs on the tokio clock.
+//!
+//! A call made by the [`crate::Router`] runs with its attempt deadline in
+//! scope ([`within_deadline`]). A pacing slot that opens after that
+//! deadline fails the claim at once instead of sleeping, so the router can
+//! receipt the attempt as rate-limited without calling upstream. A wait for
+//! a connection permit has no known end and is not refused in advance; the
+//! router's own timeout ends it. [`retry_after`] reads the header in both
+//! forms RFC 9110 section 10.2.3 allows: delay-seconds, and an HTTP-date in
+//! any of the three formats section 5.6.7 requires recipients to accept.
 
+use std::future::Future;
 use std::time::Duration;
 
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use jiff::{Span, Timestamp};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
 /// Longest hold a single `Retry-After` can impose. Longer values are
@@ -41,6 +50,77 @@ const YEARS_PER_CENTURY: i16 = 100;
 /// RFC 9110 section 5.6.7: an rfc850-date more than this many years in the
 /// future names the most recent past year with the same two digits.
 const RFC850_FUTURE_LIMIT_YEARS: i16 = 50;
+
+tokio::task_local! {
+    /// The deadline of the router attempt the current provider call runs
+    /// under.
+    static ATTEMPT_DEADLINE: Instant;
+}
+
+/// Run `call` with `deadline` as its attempt deadline, which a [`Gate`]
+/// reads to refuse a pacing wait that would end after it.
+pub(crate) async fn within_deadline<F: Future>(deadline: Instant, call: F) -> F::Output {
+    ATTEMPT_DEADLINE.scope(deadline, call).await
+}
+
+/// The deadline of the router attempt in scope, if any.
+fn attempt_deadline() -> Option<Instant> {
+    ATTEMPT_DEADLINE.try_with(|deadline| *deadline).ok()
+}
+
+/// One provider instance's connection limit and request pacing, shared by
+/// every caller of the instance.
+#[derive(Debug)]
+pub(crate) struct Gate {
+    pacer: Pacer,
+    connections: Option<Semaphore>,
+}
+
+/// Admission through a [`Gate`]: holds a connection permit, when the gate
+/// limits connections, until dropped.
+#[derive(Debug)]
+pub(crate) struct Pass<'g> {
+    _permit: Option<SemaphorePermit<'g>>,
+}
+
+impl Gate {
+    /// A gate starting requests at least `min_interval` apart with at
+    /// most `max_concurrent` open at once; `None` leaves concurrency
+    /// unlimited, and a limit of zero is taken as one.
+    pub(crate) fn new(min_interval: Duration, max_concurrent: Option<u32>) -> Self {
+        let permits = |limit: u32| usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
+        Self {
+            pacer: Pacer::new(min_interval),
+            connections: max_concurrent.map(|limit| Semaphore::new(permits(limit))),
+        }
+    }
+
+    /// Wait for a connection permit, then for the next request slot.
+    ///
+    /// Cancellation-safe: a dropped wait takes neither a permit nor a slot.
+    ///
+    /// # Errors
+    ///
+    /// [`SlotAfterDeadline`], without waiting for the slot, when a router
+    /// attempt deadline is in scope and the slot opens after it. The
+    /// permit is released.
+    pub(crate) async fn enter(&self) -> Result<Pass<'_>, SlotAfterDeadline> {
+        let permit = match &self.connections {
+            // INVARIANT: `acquire` fails only on a closed semaphore, and
+            // this one is never closed.
+            Some(connections) => connections.acquire().await.ok(),
+            None => None,
+        };
+        self.pacer.claim(attempt_deadline()).await?;
+        Ok(Pass { _permit: permit })
+    }
+
+    /// Hold every caller's next request back by `delay`, as a
+    /// `Retry-After` the instance was sent asks.
+    pub(crate) async fn hold_for(&self, delay: Duration) {
+        self.pacer.hold_for(delay).await;
+    }
+}
 
 /// Paces one provider's requests.
 ///
@@ -78,8 +158,9 @@ impl Pacer {
     /// # Errors
     ///
     /// [`SlotAfterDeadline`], without waiting, when the slot opens after
-    /// `deadline`.
-    pub(crate) async fn claim(&self, deadline: Instant) -> Result<(), SlotAfterDeadline> {
+    /// `deadline`. Without a deadline the claim waits as long as the slot
+    /// needs.
+    pub(crate) async fn claim(&self, deadline: Option<Instant>) -> Result<(), SlotAfterDeadline> {
         loop {
             let opens_at = {
                 let mut next_start = self.next_start.lock().await;
@@ -92,7 +173,7 @@ impl Pacer {
                     }
                 }
             };
-            if opens_at > deadline {
+            if deadline.is_some_and(|deadline| opens_at > deadline) {
                 return Err(SlotAfterDeadline {
                     opens_in: opens_at.saturating_duration_since(Instant::now()),
                 });
@@ -102,7 +183,10 @@ impl Pacer {
     }
 
     /// Hold the next request back until at least `delay` from now, as a
-    /// `Retry-After` asks. A later slot already set is kept.
+    /// `Retry-After` asks. A later slot already set is kept. The hold lives
+    /// on this pacer, so on the provider instance that owns it: every
+    /// caller of that instance waits it out, and a new instance starts
+    /// without it. A hold longer than `MAX_HOLD` is clamped to it.
     pub(crate) async fn hold_for(&self, delay: Duration) {
         let until = later(Instant::now(), delay.min(MAX_HOLD));
         let mut next_start = self.next_start.lock().await;
@@ -320,15 +404,15 @@ mod tests {
         let pacer = Pacer::new(Duration::from_secs(3));
         let start = Instant::now();
         let deadline = start + Duration::from_secs(60);
-        pacer.claim(deadline).await.unwrap();
+        pacer.claim(Some(deadline)).await.unwrap();
         assert_eq!(start.elapsed(), Duration::ZERO, "the first slot is free");
-        pacer.claim(deadline).await.unwrap();
+        pacer.claim(Some(deadline)).await.unwrap();
         assert_eq!(
             start.elapsed(),
             Duration::from_secs(3),
             "the second waits one interval"
         );
-        pacer.claim(deadline).await.unwrap();
+        pacer.claim(Some(deadline)).await.unwrap();
         assert_eq!(
             start.elapsed(),
             Duration::from_secs(6),
@@ -341,7 +425,7 @@ mod tests {
         let pacer = Pacer::new(Duration::ZERO);
         let start = Instant::now();
         for _ in 0..3 {
-            pacer.claim(start).await.unwrap();
+            pacer.claim(Some(start)).await.unwrap();
         }
         assert_eq!(start.elapsed(), Duration::ZERO, "no waiting at all");
     }
@@ -351,12 +435,13 @@ mod tests {
         let pacer = Pacer::new(Duration::from_secs(3));
         let start = Instant::now();
         let deadline = start + Duration::from_secs(60);
-        pacer.claim(deadline).await.unwrap();
+        pacer.claim(Some(deadline)).await.unwrap();
 
-        let abandoned = tokio::time::timeout(Duration::from_secs(1), pacer.claim(deadline)).await;
+        let abandoned =
+            tokio::time::timeout(Duration::from_secs(1), pacer.claim(Some(deadline))).await;
         assert!(abandoned.is_err(), "the waiting claim is dropped at 1 s");
 
-        pacer.claim(deadline).await.unwrap();
+        pacer.claim(Some(deadline)).await.unwrap();
         assert_eq!(
             start.elapsed(),
             Duration::from_secs(3),
@@ -368,9 +453,12 @@ mod tests {
     async fn a_slot_after_the_deadline_fails_without_waiting() {
         let pacer = Pacer::new(Duration::from_secs(3));
         let start = Instant::now();
-        pacer.claim(start + Duration::from_secs(60)).await.unwrap();
+        pacer
+            .claim(Some(start + Duration::from_secs(60)))
+            .await
+            .unwrap();
         let err = pacer
-            .claim(start + Duration::from_secs(1))
+            .claim(Some(start + Duration::from_secs(1)))
             .await
             .unwrap_err();
         assert_eq!(
@@ -389,7 +477,10 @@ mod tests {
         let start = Instant::now();
         pacer.hold_for(Duration::from_secs(10)).await;
         pacer.hold_for(Duration::from_secs(2)).await;
-        pacer.claim(start + Duration::from_secs(60)).await.unwrap();
+        pacer
+            .claim(Some(start + Duration::from_secs(60)))
+            .await
+            .unwrap();
         assert_eq!(
             start.elapsed(),
             Duration::from_secs(10),
@@ -404,7 +495,7 @@ mod tests {
         let deadline = start + Duration::from_secs(60);
         let pacer = &pacer;
         let claim = move || async move {
-            pacer.claim(deadline).await.unwrap();
+            pacer.claim(Some(deadline)).await.unwrap();
             start.elapsed()
         };
         let (a, b, c) = tokio::join!(claim(), claim(), claim());

@@ -142,7 +142,7 @@ async fn semantic_scholar(reply: Reply, deadline: Duration) -> (Wired, SemanticS
 }
 
 async fn ask(provider: &dyn Provider) -> ProviderAnswer {
-    provider.search_with_evidence(QUERY, &constraints()).await
+    provider.search(QUERY, &constraints()).await
 }
 
 fn titles(result: &ResearchResult) -> Vec<&str> {
@@ -513,5 +513,132 @@ async fn caller_domain_lists_screen_hits_not_the_providers_endpoint() {
             }
         ),
         "the allow list then screens the hits"
+    );
+}
+
+#[tokio::test]
+async fn a_denied_provider_endpoint_is_refused_before_any_connection() {
+    let (w, provider) =
+        semantic_scholar(json("200 OK", S2_DOCUMENTED), Duration::from_secs(30)).await;
+    let router = Router::new(vec![Arc::new(provider)], Duration::from_secs(30)).unwrap();
+    let denied = constraints().with_denylist(vec!["semanticscholar.org".to_owned()]);
+    let result = router
+        .search(
+            QUERY,
+            QueryShape::SemanticDiscovery,
+            &denied,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .unwrap();
+    let attempt = result.provenance.first().unwrap().attempt.clone().unwrap();
+    assert_eq!(
+        serde_json::to_value(&attempt.outcome).unwrap(),
+        serde_json::json!({
+            "status": "failed",
+            "class": "permanent",
+            "message": "permanent I/O failure: semantic_scholar: acquisition failed: unsafe_target",
+        }),
+        "the caller's deny list covers the provider's own host"
+    );
+    assert!(w.connector.attempts().is_empty(), "no connection attempted");
+    assert!(w.origin.requests().is_empty(), "nothing reached the host");
+}
+
+/// Hostile bodies whose text must never reach an error or a receipt.
+const HOSTILE: [(&str, &str, &[u8]); 6] = [
+    (
+        S2_HOST,
+        "application/json",
+        include_bytes!("fixtures/providers/semantic_scholar/search_hostile_type_changed.json"),
+    ),
+    (
+        S2_HOST,
+        "application/json",
+        include_bytes!("fixtures/providers/semantic_scholar/search_hostile_malformed.json"),
+    ),
+    (
+        WIKIPEDIA_HOST,
+        "application/json",
+        include_bytes!("fixtures/providers/wikipedia/search_hostile_type_changed.json"),
+    ),
+    (
+        WIKIPEDIA_HOST,
+        "application/json",
+        include_bytes!("fixtures/providers/wikipedia/search_hostile_malformed.json"),
+    ),
+    (
+        ARXIV_HOST,
+        "application/atom+xml",
+        include_bytes!("fixtures/providers/arxiv/search_hostile_mismatched_end.xml"),
+    ),
+    (
+        ARXIV_HOST,
+        "application/atom+xml",
+        include_bytes!("fixtures/providers/arxiv/search_hostile_entity.xml"),
+    ),
+];
+
+#[tokio::test]
+async fn hostile_body_text_never_reaches_an_attempt_receipt() {
+    for (host, media, body) in HOSTILE {
+        let reply = http("200 OK", &[("Content-Type", media)], body);
+        let (target, shape) = match host {
+            S2_HOST => (s2_target(), QueryShape::SemanticDiscovery),
+            ARXIV_HOST => (
+                target(&Arxiv::request(QUERY, &constraints()).unwrap().url),
+                QueryShape::AcademicLiterature,
+            ),
+            _ => (
+                "/w/rest.php/v1/search/page?q=stable+identity&limit=3".to_owned(),
+                QueryShape::QuickFactual,
+            ),
+        };
+        let w = wired(host, vec![(target, reply)], limits(Duration::from_secs(30))).await;
+        let provider: Arc<dyn Provider> = match host {
+            S2_HOST => Arc::new(SemanticScholar::new(
+                Arc::clone(&w.acquirer),
+                Duration::ZERO,
+            )),
+            ARXIV_HOST => Arc::new(Arxiv::new(Arc::clone(&w.acquirer))),
+            _ => Arc::new(Wikipedia::new(Arc::clone(&w.acquirer), WIKIPEDIA_AGENT).unwrap()),
+        };
+        let router = Router::new(vec![provider], Duration::from_secs(30)).unwrap();
+        let result = router
+            .search(QUERY, shape, &constraints(), jiff::Timestamp::now())
+            .await
+            .unwrap();
+        let attempt = result.provenance.first().unwrap().attempt.clone().unwrap();
+        let AttemptOutcome::Failed { message, .. } = &attempt.outcome else {
+            panic!("{host}: a hostile body fails the attempt: {attempt:?}");
+        };
+        assert!(
+            message.contains("malformed response")
+                && !message.contains("IGNORE")
+                && !message.contains("INSTRUCTIONS"),
+            "{host}: the receipt names the defect, never the body text: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_provider_returns_no_more_hits_than_it_was_asked_for() {
+    let two = SearchConstraints::new(2, BudgetConstraint::free_only());
+    let request = SemanticScholar::request(QUERY, &two).unwrap();
+    let w = wired(
+        S2_HOST,
+        vec![(target(&request.url), json("200 OK", S2_DOCUMENTED))],
+        limits(Duration::from_secs(30)),
+    )
+    .await;
+    let provider = SemanticScholar::new(Arc::clone(&w.acquirer), Duration::ZERO);
+    let result = provider.search(QUERY, &two).await.result.unwrap();
+    assert_eq!(
+        titles(&result),
+        [
+            "Routing Queries Across Free Scholarly Indexes",
+            "Deduplicating Preprints by Stable Identity",
+        ],
+        "an upstream that ignores `limit=2` still yields the first two, in rank order"
     );
 }

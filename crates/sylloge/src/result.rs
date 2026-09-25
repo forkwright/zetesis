@@ -326,33 +326,45 @@ impl ResearchResult {
         self.hits.iter().any(ResultHit::has_strong_citation)
     }
 
-    /// Whether this result holds evidence, and if not, whether any
-    /// provider answered.
+    /// Whether this result holds evidence, and if not, whether the
+    /// providers that were asked all answered.
     ///
     /// An empty hit list alone cannot tell "the providers found nothing"
     /// from "no provider could be asked"; this reads the attempt receipts
-    /// in [`ResearchResult::provenance`] to tell them apart. A result with
-    /// no hits and no receipt of an answer reads as
-    /// [`EvidenceState::Unanswered`], never as absence of evidence.
+    /// in [`ResearchResult::provenance`] to tell them apart. A provider
+    /// answered cleanly when its receipt is empty, or answered with at
+    /// least one hit (whatever the caller's screens then dropped). A
+    /// provider that failed, timed out, or answered only malformed records
+    /// did not answer; a refused provider was not asked and counts neither
+    /// way.
+    ///
+    /// - [`EvidenceState::Answered`]: at least one hit survived.
+    /// - [`EvidenceState::NoEvidence`]: nothing survived, and every
+    ///   provider that was asked answered cleanly.
+    /// - [`EvidenceState::Incomplete`]: nothing survived, at least one
+    ///   provider answered cleanly, and another that was asked did not.
+    /// - [`EvidenceState::Unanswered`]: no provider answered cleanly,
+    ///   including a result with no attempt receipt.
     #[must_use]
     pub fn evidence_state(&self) -> EvidenceState {
         if !self.hits.is_empty() {
             return EvidenceState::Answered;
         }
-        let answered = self
+        let asked: Vec<bool> = self
             .provenance
             .iter()
             .filter_map(|entry| entry.attempt.as_ref())
-            .any(|attempt| {
-                matches!(
-                    attempt.outcome,
-                    AttemptOutcome::Answered { .. } | AttemptOutcome::Empty
-                )
-            });
-        if answered {
-            EvidenceState::NoEvidence
-        } else {
-            EvidenceState::Unanswered
+            .filter_map(|attempt| match attempt.outcome {
+                AttemptOutcome::Refused { .. } => None,
+                AttemptOutcome::Empty => Some(true),
+                AttemptOutcome::Answered { returned, .. } => Some(returned > 0),
+                AttemptOutcome::Failed { .. } | AttemptOutcome::TimedOut { .. } => Some(false),
+            })
+            .collect();
+        match (asked.contains(&true), asked.contains(&false)) {
+            (false, _) => EvidenceState::Unanswered,
+            (true, true) => EvidenceState::Incomplete,
+            (true, false) => EvidenceState::NoEvidence,
         }
     }
 
@@ -377,13 +389,18 @@ impl ResearchResult {
 pub enum EvidenceState {
     /// At least one hit survived screening.
     Answered,
-    /// At least one provider answered, and nothing it returned survived:
-    /// it had no hits, or every hit was dropped by the caller's screens or
-    /// as a malformed record.
+    /// Every provider that was asked answered cleanly, and nothing
+    /// survived: they had no hits, or the caller's screens dropped every
+    /// hit.
     NoEvidence,
-    /// No provider is recorded as having answered: every attempt failed,
-    /// timed out, or was refused, or the result carries no attempt receipt.
-    /// This is not evidence of absence.
+    /// Nothing survived, and the answer is partial: at least one provider
+    /// answered cleanly, and another that was asked failed, timed out, or
+    /// answered only malformed records. Absence here is not evidence of
+    /// absence either.
+    Incomplete,
+    /// No provider answered cleanly: every attempt failed, timed out,
+    /// answered only malformed records, or was refused, or the result
+    /// carries no attempt receipt. This is not evidence of absence.
     Unanswered,
 }
 
@@ -540,8 +557,16 @@ pub enum RefusalReason {
     /// The provider is in a paid tier. Paid routing needs a durable budget
     /// ledger that can reserve and settle spend per attempt, which does not
     /// exist yet, so the router refuses every paid provider regardless of
-    /// the caller's [`crate::BudgetConstraint`].
+    /// the caller's [`crate::BudgetConstraint`]. The router routes only
+    /// [`crate::ProviderTier::Tier0Free`] and
+    /// [`crate::ProviderTier::Tier2SelfHosted`]; every other tier is
+    /// refused with this reason.
     PaidRoutingUnavailable,
+    /// The caller set a freshness window under
+    /// [`crate::FreshnessPolicy::Strict`], and the provider declares
+    /// [`crate::PublicationTimeCapability::Unsupported`]: none of its hits
+    /// could pass the window, so it is not called.
+    PublicationTimeUnsupported,
 }
 
 #[cfg(test)]
