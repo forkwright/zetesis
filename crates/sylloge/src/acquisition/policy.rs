@@ -101,7 +101,7 @@ pub(crate) fn redirect_target(
     location: &HeaderValue,
     limits: &AcquisitionLimits,
 ) -> Result<Url, AcquisitionFailure> {
-    let raw = location_text(location);
+    let raw = location_evidence(current, location);
     let Ok(text) = std::str::from_utf8(location.as_bytes()) else {
         return Err(AcquisitionFailure::MalformedRedirect {
             location: raw,
@@ -130,9 +130,31 @@ pub(crate) fn redirect_target(
     Ok(next)
 }
 
-/// Lossy text of a `Location` value for hop evidence.
-pub(crate) fn location_text(location: &HeaderValue) -> String {
-    String::from_utf8_lossy(location.as_bytes()).into_owned()
+/// Recorded in place of an unparseable `Location` that might carry a
+/// credential.
+const WITHHELD_LOCATION: &str = "[withheld: unparseable Location containing '@']";
+
+/// A `Location` value as recorded in evidence, with no credential in it.
+///
+/// A value that resolves against `current` to a URL with userinfo is
+/// recorded as that URL without its userinfo. A value that does not
+/// resolve and contains `@` is withheld, because only the URL parser can
+/// say where its userinfo would be. Anything else is recorded as received
+/// (lossy UTF-8).
+///
+/// WHY: the WHATWG parser finds userinfo in spellings a text scan misses
+/// (another special scheme without slashes, a scheme-relative reference, a
+/// tab inside the userinfo), so the parser, not a pattern, decides.
+pub(crate) fn location_evidence(current: &Url, location: &HeaderValue) -> String {
+    let received = String::from_utf8_lossy(location.as_bytes());
+    let resolved = std::str::from_utf8(location.as_bytes())
+        .ok()
+        .and_then(|text| current.join(text).ok());
+    match resolved {
+        Some(target) if has_userinfo(&target) => without_userinfo(&target).into(),
+        None if received.contains('@') => WITHHELD_LOCATION.to_owned(),
+        Some(_) | None => received.into_owned(),
+    }
 }
 
 /// Key identifying a request target within one redirect chain: the URL
@@ -291,6 +313,38 @@ mod tests {
         assert!(
             matches!(failure, AcquisitionFailure::MalformedRedirect { .. }),
             "an unparseable Location is malformed: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn location_evidence_never_carries_userinfo() {
+        let current = url("http://8.8.8.8/a");
+        for (location, recorded) in [
+            ("/users/@alice", "/users/@alice"),
+            ("http://user:pw@9.9.9.9/", "http://9.9.9.9/"),
+            ("//user:pw@9.9.9.9/x", "http://9.9.9.9/x"),
+            ("https:user:pw@9.9.9.9/", "https://9.9.9.9/"),
+            ("http://user:pw@[::1/", WITHHELD_LOCATION),
+            ("http://[::1/", "http://[::1/"),
+        ] {
+            let value = HeaderValue::from_str(location).unwrap();
+            assert_eq!(
+                location_evidence(&current, &value),
+                recorded,
+                "{location:?}"
+            );
+        }
+        let tabbed = HeaderValue::from_bytes(b"http://us\ter:pw@9.9.9.9/").unwrap();
+        assert_eq!(
+            location_evidence(&current, &tabbed),
+            "http://9.9.9.9/",
+            "a tab inside the userinfo is removed before parsing, not a disguise"
+        );
+        let invalid = HeaderValue::from_bytes(b"http://user:pw@\xff/").unwrap();
+        assert_eq!(
+            location_evidence(&current, &invalid),
+            WITHHELD_LOCATION,
+            "non-UTF-8 with '@' cannot be parsed, so it is withheld"
         );
     }
 

@@ -52,7 +52,9 @@ pub enum AcquisitionFailure {
     },
     /// A redirect `Location` could not be turned into a URL within limits.
     MalformedRedirect {
-        /// The `Location` value as received (lossy UTF-8).
+        /// The `Location` value as received (lossy UTF-8), except that
+        /// a value containing `@` is withheld, since an unparseable value
+        /// could carry a credential.
         location: String,
         /// Why it was rejected.
         reason: String,
@@ -426,7 +428,10 @@ impl HopRecord {
         self.status
     }
 
-    /// Raw `Location` value (lossy UTF-8) of a redirect response.
+    /// `Location` value of a redirect response: as received (lossy
+    /// UTF-8), except that a value resolving to a URL with userinfo is
+    /// recorded as that URL without it, and an unparseable value
+    /// containing `@` is withheld. No credential is ever recorded.
     #[must_use]
     pub fn location(&self) -> Option<&str> {
         self.location.as_deref()

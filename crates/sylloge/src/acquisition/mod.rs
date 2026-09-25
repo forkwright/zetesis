@@ -324,13 +324,13 @@ impl StaticAcquirer {
             let target = self.validate(&url, port, constraints, local).await?;
             evidence.current.set_resolved(target.addrs().to_vec());
             let exchange = self.fetch_hop(&target, port, &mut evidence.current).await?;
-            let Some(location) = redirect_location(&exchange)? else {
+            let Some(location) = redirect_location(&url, &exchange)? else {
                 return accept(exchange, &self.limits, &mut evidence.response).await;
             };
             drop(exchange);
             evidence
                 .current
-                .set_location(policy::location_text(&location));
+                .set_location(policy::location_evidence(&url, &location));
             let next = policy::redirect_target(&url, &location, &self.limits)?;
             if policy::has_userinfo(&next) {
                 return Err(AcquisitionFailure::UnsafeTarget {
@@ -641,6 +641,7 @@ impl ConnectFailures {
 /// The `Location` to follow, if this response is a redirect. A redirect
 /// status without `Location` is a final response.
 fn redirect_location(
+    url: &Url,
     exchange: &Exchange,
 ) -> std::result::Result<Option<HeaderValue>, AcquisitionFailure> {
     let redirect = matches!(
@@ -660,7 +661,7 @@ fn redirect_location(
     };
     if values.next().is_some() {
         return Err(AcquisitionFailure::MalformedRedirect {
-            location: policy::location_text(first),
+            location: policy::location_evidence(url, first),
             reason: "response carries more than one Location".to_owned(),
         });
     }

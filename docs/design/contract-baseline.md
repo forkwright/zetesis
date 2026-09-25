@@ -302,7 +302,7 @@ fields.
 | `connect_attempts` | list of `{ addr, result }` | `addr` is a socket address; `result` is `connected`, `denied`, `refused`, `timed_out`, or `error` |
 | `tls` | optional `{ protocol_version, server_name, peer_leaf_sha256 }` | TLS facts for this hop |
 | `status` | optional `u16` | HTTP status |
-| `location` | optional string | Raw `Location` header value |
+| `location` | optional string | `Location` header value as received, except that a value resolving to a URL with userinfo is recorded as that URL without it and an unparseable value containing `@` is withheld |
 
 `ResponseRecord`: `status`, `content_type`, `content_encoding` (list),
 `content_length` (optional `u64`), `last_modified`, `etag`, `date`,

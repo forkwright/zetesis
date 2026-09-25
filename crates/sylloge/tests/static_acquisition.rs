@@ -1122,6 +1122,11 @@ async fn userinfo_never_enters_a_request_or_hop_record() {
         [addr("8.8.8.8:80")],
         "9.9.9.9 never dialed"
     );
+    let evidence = serde_json::to_string(transfer.envelope()).unwrap();
+    assert!(
+        !evidence.contains("origin-secret"),
+        "the redirect's credential is not recorded either: {evidence}"
+    );
 }
 
 #[tokio::test]
@@ -2079,4 +2084,127 @@ async fn cookies_are_never_sent_or_recorded() {
             hop.url()
         );
     }
+}
+
+// -- A credential in a redirect Location never enters evidence. --
+
+#[tokio::test]
+async fn redirect_setting_a_cookie_to_a_userinfo_target_records_no_credential() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 1),
+        raw(
+            b"HTTP/1.1 302 Found\r\nSet-Cookie: session=hop-cookie-secret\r\n\
+              Location: http://user:userinfo-secret@9.9.9.9/\r\nContent-Length: 0\r\n\
+              Connection: close\r\n\r\n",
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert!(
+        matches!(failure(&transfer), AcquisitionFailure::UnsafeTarget { .. }),
+        "a userinfo redirect target is refused: {:?}",
+        transfer.envelope().outcome()
+    );
+    assert_eq!(
+        h.connector.attempts(),
+        [addr("8.8.8.8:80")],
+        "9.9.9.9 never dialed"
+    );
+    assert_eq!(
+        transfer.envelope().hops()[0].location(),
+        Some("http://9.9.9.9/"),
+        "the refused target is recorded without its userinfo"
+    );
+    let evidence = serde_json::to_string(transfer.envelope()).unwrap();
+    assert!(
+        !evidence.contains("cookie-secret"),
+        "no Set-Cookie value is recorded: {evidence}"
+    );
+    assert!(
+        !evidence.contains("userinfo-secret"),
+        "no userinfo is recorded: {evidence}"
+    );
+}
+
+#[tokio::test]
+async fn userinfo_in_any_location_spelling_is_never_recorded() {
+    // WHY: the WHATWG parser finds userinfo in spellings a text scan would
+    // miss: another special scheme without slashes (read as an authority;
+    // the same scheme without slashes would be a relative path), a
+    // scheme-relative reference, and a tab (removed before parsing) inside
+    // the userinfo.
+    for (location, recorded) in [
+        ("https:user:spelling-secret@9.9.9.9/", "https://9.9.9.9/"),
+        ("//user:spelling-secret@9.9.9.9/x", "http://9.9.9.9/x"),
+        ("http://us\ter:spelling-secret@9.9.9.9/", "http://9.9.9.9/"),
+    ] {
+        let head = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+        );
+        let h = serving(limits(SchemePolicy::HttpAndHttps, 1), raw(head.as_bytes()));
+
+        let transfer = h.get(ORIGIN).await;
+
+        assert!(
+            matches!(failure(&transfer), AcquisitionFailure::UnsafeTarget { .. }),
+            "{location:?}: the target is refused: {:?}",
+            transfer.envelope().outcome()
+        );
+        assert_eq!(
+            transfer.envelope().hops()[0].location(),
+            Some(recorded),
+            "{location:?}: recorded as the target without userinfo"
+        );
+        let evidence = serde_json::to_string(transfer.envelope()).unwrap();
+        assert!(
+            !evidence.contains("spelling-secret"),
+            "{location:?}: no userinfo is recorded: {evidence}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unparseable_redirect_with_userinfo_records_no_credential() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 1),
+        raw(
+            b"HTTP/1.1 302 Found\r\nLocation: http://user:userinfo-secret@[::1/\r\n\
+              Content-Length: 0\r\nConnection: close\r\n\r\n",
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert!(
+        matches!(
+            failure(&transfer),
+            AcquisitionFailure::MalformedRedirect { .. }
+        ),
+        "an unparseable Location is malformed: {:?}",
+        transfer.envelope().outcome()
+    );
+    let evidence = serde_json::to_string(transfer.envelope()).unwrap();
+    assert!(
+        !evidence.contains("userinfo-secret"),
+        "no userinfo is recorded: {evidence}"
+    );
+}
+
+#[tokio::test]
+async fn location_without_userinfo_is_recorded_as_received() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        raw(b"HTTP/1.1 302 Found\r\nLocation: /users/@alice?x=1\r\n\
+              Content-Length: 0\r\nConnection: close\r\n\r\n"),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        transfer.envelope().hops()[0].location(),
+        Some("/users/@alice?x=1"),
+        "a Location without userinfo keeps its received text, '@' in the path included"
+    );
 }
