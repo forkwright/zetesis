@@ -28,6 +28,9 @@ const PAGE: &[u8] = include_bytes!("fixtures/evidence/page.html");
 const PAGE_GZ: &[u8] = include_bytes!("fixtures/evidence/page.html.gz");
 const GOLDEN: &str = include_str!("fixtures/evidence/golden_envelope.json");
 const GOLDEN_FAILED: &str = include_str!("fixtures/evidence/golden_failed_envelope.json");
+const RELEASE_RECORD: &str = include_str!("../../../docs/design/static-acquisition-release.md");
+const ACQUISITION_TESTS: &str = include_str!("static_acquisition.rs");
+const ENVELOPE_TESTS: &str = include_str!("evidence_envelope.rs");
 
 const URL: &str = "http://public.example/tides?station=7";
 const WIRE_SHA256: &str = "cb169b3b23ad8767099566b7093ab6b02af83093dd67d96064af0007091eb6ec";
@@ -138,6 +141,15 @@ fn golden_json() -> serde_json::Value {
 
 fn decode(value: serde_json::Value) -> Result<EvidenceEnvelope, serde_json::Error> {
     serde_json::from_value(value)
+}
+
+/// Lowercase hex SHA-256 of `bytes`, computed with `ring` directly.
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in ring::digest::digest(&ring::digest::SHA256, bytes).as_ref() {
+        write!(out, "{byte:02x}").unwrap();
+    }
+    out
 }
 
 /// The fingerprint rule restated from the schema: SHA-256 over each field,
@@ -495,4 +507,68 @@ fn cbor_encoding_shares_field_names_and_version_rules() {
         err.to_string().contains("schema_version"),
         "CBOR applies the same version refusal: {err}"
     );
+}
+
+// -- Phase 01 S3: the release record consumers pin against. --
+
+#[test]
+fn release_record_matches_the_code_and_fixtures() {
+    // WHY: consumers pin the revision, schema, and fixtures this record
+    // names. A fixture, schema, or extractor change after release must fail
+    // here instead of silently diverging from what was published.
+    let schema = format!("`{EVIDENCE_SCHEMA_ID}`, version `{EVIDENCE_SCHEMA_VERSION}`");
+    assert!(
+        RELEASE_RECORD.contains(&schema),
+        "the record names the schema this build emits: {schema}"
+    );
+    let extractor = ExtractorId::current();
+    let extractor = format!("`{}`, version `{}`", extractor.id, extractor.version);
+    assert!(
+        RELEASE_RECORD.contains(&extractor),
+        "the record names the extractor this build runs: {extractor}"
+    );
+    for (name, bytes) in [
+        ("page.html", PAGE),
+        ("page.html.gz", PAGE_GZ),
+        ("golden_envelope.json", GOLDEN.as_bytes()),
+        ("golden_failed_envelope.json", GOLDEN_FAILED.as_bytes()),
+    ] {
+        let row = format!("| `{name}` | `{}` |", hex_sha256(bytes));
+        assert!(
+            RELEASE_RECORD.contains(&row),
+            "{name}: released fixture bytes changed, or the record is stale ({row})"
+        );
+    }
+    for fingerprint in [FINGERPRINT, FAILED_FINGERPRINT] {
+        assert!(
+            RELEASE_RECORD.contains(fingerprint),
+            "the record carries golden fingerprint {fingerprint}"
+        );
+    }
+}
+
+#[test]
+fn release_record_names_only_existing_tests() {
+    let boundary = RELEASE_RECORD
+        .split("| Boundary | Tests |")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap();
+    let names: Vec<&str> = boundary
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|name| !name.contains('/') && !name.contains('.'))
+        .collect();
+    assert!(
+        names.len() >= 20,
+        "the boundary index lists its tests: {names:?}"
+    );
+    for name in names {
+        let definition = format!("fn {name}(");
+        assert!(
+            ACQUISITION_TESTS.contains(&definition) || ENVELOPE_TESTS.contains(&definition),
+            "the release record names a test that does not exist: {name}"
+        );
+    }
 }

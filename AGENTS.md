@@ -13,6 +13,7 @@ Read CLAUDE.md first for repo conventions and design principles.
 - `README.md` — purpose, boundaries, consumer map
 - `CLAUDE.md` — design principles, repo conventions, gotchas
 - `docs/design/contract-baseline.md` — public API inventory (enforced versus convention), contract ownership, identity, evidence envelope, storage
+- `docs/design/static-acquisition-release.md` — the producer revision consumers pin, schema and extractor versions, conformance fixtures
 - `_llm/architecture.toml` — landed and planned crate roles
 - `_llm/current_state.toml` — current phase, open threads
 - `_llm/decisions.toml` — accepted design decisions

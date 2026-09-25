@@ -11,6 +11,7 @@ The landed Rust surface is the `sylloge` provider, constraint, network-target, s
 ## Architecture
 
 - [docs/design/contract-baseline.md](docs/design/contract-baseline.md): public API inventory, contract ownership, identity and idempotency, evidence envelope v1, storage
+- [docs/design/static-acquisition-release.md](docs/design/static-acquisition-release.md): producer revision to pin, evidence schema and extractor versions, conformance fixtures
 
 Structured LLM corpus:
 - [_llm/architecture.toml](_llm/architecture.toml): landed and planned crate roles
