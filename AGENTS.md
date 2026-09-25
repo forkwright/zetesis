@@ -25,7 +25,7 @@ Pre-release. Four-crate workspace: `zetesis`, `sylloge`, `elenkhos`, and `synops
 `sylloge` owns the provider, constraint, network-target, citation, result, cost, budget, and deep-research lifecycle types. `zetesis` re-exports them as the facade.
 `elenkhos` and `synopsis` are marker types holding their crate boundary.
 `LocalDeepResearch` is an in-memory task lifecycle with an offline five-node loop fixture; it calls no model and no network.
-No provider adapter, HTTP client, cache, durable ledger, or model binding exists. `docs/design/contract-baseline.md` lists what each public type enforces and what is caller convention.
+`StaticAcquirer` is the only HTTP client (anonymous static GET with per-hop validation, bounded decoding, static extraction, and evidence envelope v1). No provider adapter, cache, durable ledger, or model binding exists. `docs/design/contract-baseline.md` lists what each public type enforces and what is caller convention.
 
 ## Open work
 

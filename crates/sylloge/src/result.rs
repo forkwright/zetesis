@@ -77,7 +77,8 @@ pub struct ResultHit {
 impl ResultHit {
     /// Maximum accepted `full_text` size in bytes. Untrusted provider
     /// payloads beyond this cap are rejected rather than buffered (see
-    /// [`crate::PageContent::MAX_BODY_BYTES`] for the crawler-side cap).
+    /// [`crate::AcquisitionLimits::MAX_BODY_BYTES_CEILING`] for the
+    /// static-acquisition cap).
     pub const MAX_FULL_TEXT_BYTES: usize = 4 * 1024 * 1024;
 
     /// Construct a hit, clamping `score` into `0.0..=1.0` (see

@@ -11,6 +11,13 @@ ignore = []
 allow = [
     "AGPL-3.0-or-later",
     "Apache-2.0",
+    # WHY: subtle (constant-time comparisons inside rustls) is BSD-3-Clause
+    # only; rustls is the TLS stack for static acquisition.
+    "BSD-3-Clause",
+    # WHY: ring (rustls's crypto provider, also used for SHA-256 hop
+    # evidence; `Apache-2.0 AND ISC`), rustls-webpki (certificate
+    # verification), and untrusted (ring's input parser) are ISC-licensed.
+    "ISC",
     "MIT",
     "Unicode-3.0",
     "Unlicense",
@@ -23,6 +30,14 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "deny"
 wildcards = "allow"
+skip = [
+    # WHY: Windows-only split. ring 0.17.14 (the latest ring, via rustls)
+    # pins windows-sys 0.52, while tokio 1.x (via mio and socket2) and
+    # schannel (via rustls-native-certs) use windows-sys 0.61. No ring
+    # release accepts 0.61, so the older copy is skipped by exact version;
+    # a third windows-sys version still fails the check.
+    { crate = "windows-sys@0.52.0", reason = "ring 0.17.14 pins 0.52; tokio, mio, socket2, and schannel use 0.61" },
+]
 
 [sources]
 unknown-registry = "deny"

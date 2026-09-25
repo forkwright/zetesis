@@ -1,0 +1,70 @@
+[
+  {
+    "kind": "unsafe_target",
+    "reason": "resolved address 10.0.0.7 is in a blocked range"
+  },
+  {
+    "kind": "scheme_not_allowed",
+    "scheme": "ftp"
+  },
+  {
+    "kind": "downgrade_refused"
+  },
+  {
+    "kind": "denied_port",
+    "port": 25
+  },
+  {
+    "kind": "redirect_limit",
+    "max_redirects": 2
+  },
+  {
+    "kind": "redirect_loop",
+    "url": "http://8.8.8.8/a"
+  },
+  {
+    "kind": "malformed_redirect",
+    "location": "http://[::1/",
+    "reason": "invalid IPv6 address"
+  },
+  {
+    "kind": "egress_denied",
+    "reason": "resolver refused denied.example"
+  },
+  {
+    "kind": "connect_timeout",
+    "timeout_ms": 2000
+  },
+  {
+    "kind": "deadline_exceeded",
+    "deadline_ms": 10000
+  },
+  {
+    "kind": "header_limit",
+    "max_header_bytes": 8192
+  },
+  {
+    "kind": "unsupported_content_encoding",
+    "coding": "gzip, br"
+  },
+  {
+    "kind": "unsupported_content_type",
+    "media_type": "application/pdf"
+  },
+  {
+    "kind": "unsupported_content_type",
+    "media_type": null
+  },
+  {
+    "kind": "wire_limit",
+    "max_body_bytes": 65536
+  },
+  {
+    "kind": "decoded_limit",
+    "max_decoded_bytes": 131072
+  },
+  {
+    "kind": "corrupt_content_encoding",
+    "reason": "corrupt deflate stream"
+  }
+]

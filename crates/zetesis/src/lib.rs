@@ -4,20 +4,26 @@
 
 pub use elenkhos as steelman;
 pub use sylloge::{
-    Arxiv, AttemptOutcome, BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation,
-    CostTracking, Crawler, DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, EndpointPolicy,
-    Error, ErrorClass, EvidenceState, FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision,
-    FreshnessPolicy, InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch,
-    LocalTargetAuthorization, MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu,
-    PageContent, ParsedResponse, PermanentIoSnafu, ProvenanceEntry, Provider, ProviderAttempt,
-    ProviderFailureSnafu, ProviderId, ProviderRequest, ProviderSpend, ProviderTier,
-    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
-    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimit, RateLimitedSnafu, RefusalReason,
-    ResearchResult, ResearchStatus, Resolver, Result, ResultHit, Router, SearchConstraints,
-    SemanticScholar, SourceKind, SourceRetriever, SpendEvent, SpendLedger, Synthesizer,
-    SystemResolver, TaskId, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu,
-    TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
-    Wikipedia, evaluate_freshness,
+    Acquisition, AcquisitionFailure, AcquisitionLimits, Arxiv, AttemptOutcome, BodyRecord, BoxFut,
+    BudgetConstraint, BudgetExceededSnafu, BudgetScope, Charset, CharsetSource, Citation,
+    ConnectAttempt, ConnectDeniedSnafu, ConnectError, ConnectIoSnafu, ConnectOutcome,
+    ConnectTimedOutSnafu, ConnectedStream, Connector, ContentCoding, CostTracking, DAY_WINDOW,
+    DeepDepth, DeepResearch, DirectConnector, DomainDeniedSnafu, DowngradePolicy,
+    EVIDENCE_SCHEMA_ID, EVIDENCE_SCHEMA_VERSION, EndpointPolicy, Error, ErrorClass,
+    EvidenceEnvelope, EvidenceState, ExtractionRecord, ExtractorId, FatalCorruptionSnafu,
+    FreshnessBasis, FreshnessDecision, FreshnessPolicy, HopRecord, InvalidConstraintSnafu,
+    InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization, Media, MissingCitationsSnafu,
+    OfflineFixture, Outcome, OversizedPayloadSnafu, ParsedResponse, PartialReason,
+    PermanentIoSnafu, Producer, ProvenanceEntry, Provider, ProviderAttempt, ProviderFailureSnafu,
+    ProviderId, ProviderRequest, ProviderSpend, ProviderTier, PublicationPrecision,
+    PublicationProvenance, PublicationTime, PublicationTimeCapability, QueryGenerator, QueryShape,
+    QuotaExhaustedSnafu, RateLimit, RateLimitedSnafu, RefusalReason, ReplayOutcome, ResearchResult,
+    ResearchStatus, Resolver, ResponseRecord, Result, ResultHit, Router, SchemePolicy,
+    SearchConstraints, Segment, SemanticScholar, SourceKind, SourceRetriever, SpendEvent,
+    SpendLedger, StaticAcquirer, StaticAcquirerBuilder, Synthesizer, SystemResolver, TaskId,
+    TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TlsRecord, TransientIoSnafu,
+    TrustAnchors, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
+    Wikipedia, evaluate_freshness, replay,
 };
 pub use synopsis as briefing;
 
@@ -69,6 +75,106 @@ mod tests {
         .build();
         assert!(e.is_permanent());
         assert!(e.to_string().contains("re-export check"));
+    }
+
+    /// The evidence types, reached through the facade, for an acquisition
+    /// refused before any socket.
+    fn assert_refused_envelope(acquisition: &Acquisition) -> &EvidenceEnvelope {
+        let envelope: &EvidenceEnvelope = acquisition.envelope();
+        assert_eq!(
+            envelope.schema_version(),
+            EVIDENCE_SCHEMA_VERSION,
+            "the envelope carries the producer's schema version"
+        );
+        assert!(
+            envelope.fingerprint().starts_with("sha256:"),
+            "the envelope is fingerprinted"
+        );
+        let hops: &[HopRecord] = envelope.hops();
+        let attempts: &[ConnectAttempt] = hops[0].connect_attempts();
+        assert!(attempts.is_empty(), "a refused target is never dialed");
+        let tls: Option<&TlsRecord> = hops[0].tls();
+        assert!(tls.is_none(), "no handshake happened");
+        let response: Option<&ResponseRecord> = envelope.response();
+        assert!(response.is_none(), "a refused transfer has no response");
+        let body: Option<&BodyRecord> = envelope.body();
+        assert!(body.is_none(), "a refused transfer has no body record");
+        assert!(acquisition.body().is_empty(), "and no body bytes");
+        assert_eq!(
+            replay(envelope, acquisition.body()),
+            ReplayOutcome::NothingToReplay,
+            "a failed acquisition has no transformation to replay"
+        );
+        envelope
+    }
+
+    #[tokio::test]
+    async fn static_acquisition_types_are_reachable_through_facade() {
+        // WHY: the acquisition surface is new in sylloge; a dropped facade
+        // re-export would break consumers silently. Each type is exercised
+        // through the facade path, not only named in a `pub use`.
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let limits = AcquisitionLimits::new(
+            SchemePolicy::HttpAndHttps,
+            3,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            1024,
+        )
+        .unwrap()
+        .with_downgrade(DowngradePolicy::Refuse);
+        let anchor = rcgen::generate_simple_self_signed(vec!["facade.example".to_owned()]).unwrap();
+        let trust = TrustAnchors::from_der([anchor.cert.der().as_ref()]).unwrap();
+        let connector: Arc<dyn Connector> = Arc::new(DirectConnector);
+        let resolver: Arc<dyn Resolver + Send + Sync> = Arc::new(SystemResolver);
+        let builder: StaticAcquirerBuilder = StaticAcquirer::builder(limits, trust);
+        let acquirer = builder
+            .connector(connector)
+            .resolver(resolver)
+            .user_agent("zetesis-facade-test")
+            .build()
+            .unwrap();
+
+        // WHY: a loopback IP literal is refused by policy before any
+        // resolution or socket, so this needs no network access.
+        let acquisition: Acquisition = acquirer
+            .acquire(
+                &Url::parse("http://127.0.0.1/").unwrap(),
+                &SearchConstraints::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let envelope = assert_refused_envelope(&acquisition);
+        let Outcome::Failed { failure } = envelope.outcome() else {
+            panic!("loopback without authority must fail");
+        };
+        let failure: &AcquisitionFailure = failure;
+        assert_eq!(failure.kind(), "unsafe_target", "policy refusal kind");
+        assert_eq!(
+            failure.class(),
+            ErrorClass::Permanent,
+            "policy never clears"
+        );
+
+        let denied: ConnectError = ConnectDeniedSnafu { reason: "facade" }.build();
+        let timed_out: ConnectError = ConnectTimedOutSnafu.build();
+        let io: ConnectError = snafu::IntoError::into_error(
+            ConnectIoSnafu,
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+        );
+        for err in [denied, timed_out, io] {
+            assert!(!err.to_string().is_empty(), "connect errors render");
+        }
+        let outcome = ConnectOutcome::Denied;
+        assert_ne!(outcome, ConnectOutcome::Connected, "outcomes are distinct");
+        let no_stream: Option<Box<dyn ConnectedStream>> = None;
+        assert!(
+            no_stream.is_none(),
+            "ConnectedStream is nameable as a trait object"
+        );
     }
 
     #[test]

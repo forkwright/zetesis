@@ -11,14 +11,24 @@
 //!   [`crate::ResearchResult`] in one round trip.
 //! - [`DeepResearch`] — multi-step research with async task lifecycle
 //!   (submit → poll → fetch).
-//! - [`Crawler`] — per-URL full-page content retrieval for when a hit
-//!   needs the body extracted.
+//! - [`Connector`] — the connection-binding seam [`StaticAcquirer`] opens
+//!   each validated address through; consumer egress adapters implement it.
 //!
 //! All three traits hand-roll their async methods as [`BoxFut`] returns
 //! (`Pin<Box<dyn Future + Send>>`) so they stay dyn-compatible — the
 //! [`Router`] stores providers as `Arc<dyn Provider>` — with
 //! `Send`-bounded futures and no `async-trait` dependency.
 //! Implementations wrap method bodies in `Box::pin(async move { .. })`.
+//!
+//! # Static acquisition
+//!
+//! [`StaticAcquirer`] is the one concrete anonymous `GET` fetcher. It owns
+//! every hop of a transfer, validates each hop's target before any socket,
+//! connects only to the validated addresses, decodes the bounded body,
+//! extracts its static text, and returns an [`Acquisition`]: the versioned
+//! [`EvidenceEnvelope`] to store verbatim and the decoded body bytes. See
+//! [`StaticAcquirer`] for the policy and [`EvidenceEnvelope`] for the
+//! schema, fingerprint, and [`replay`].
 //!
 //! # Routing and the first provider cohort
 //!
@@ -71,8 +81,9 @@
 //! Metadata keys, each present only when the provider supplied the value:
 //! `doi` (a publisher DOI, lowercased, no resolver prefix), `arxiv_doi`
 //! (the DOI arXiv registers for its own record, which also supplies
-//! `arxiv_id`), `arxiv_id` (no version), `arxiv_version`, `s2_paper_id`, `corpus_id`, `pageid`,
-//! `authors` (names in order), `year`, `venue`, `license`, and
+//! `arxiv_id`), `arxiv_id` (no version), `arxiv_version`, `s2_paper_id`,
+//! `corpus_id`, `pageid`, `authors` (names in order), `year`, `venue`,
+//! `license`, and
 //! `provider_policy_revision` (the [`EndpointPolicy::revision`] the request
 //! was built under).
 //!
@@ -91,13 +102,15 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod acquisition;
 mod budget;
 mod citation;
 mod constraints;
 mod cost;
-mod crawler;
 mod deep;
+mod digest;
 mod error;
+mod evidence;
 mod fixture;
 mod freshness;
 mod local_deep_research;
@@ -111,11 +124,16 @@ mod router;
 mod serde_util;
 mod tier;
 
+pub use acquisition::{
+    AcquisitionFailure, AcquisitionLimits, ConnectAttempt, ConnectDeniedSnafu, ConnectError,
+    ConnectIoSnafu, ConnectOutcome, ConnectTimedOutSnafu, ConnectedStream, Connector,
+    DirectConnector, DowngradePolicy, HopRecord, ResponseRecord, SchemePolicy, StaticAcquirer,
+    StaticAcquirerBuilder, TlsRecord, TrustAnchors,
+};
 pub use budget::{BudgetConstraint, BudgetScope, DAY_WINDOW, SpendEvent, SpendLedger};
 pub use citation::{Citation, SourceKind};
-pub use constraints::{DeepDepth, PageContent, ResearchStatus, SearchConstraints, TaskId};
+pub use constraints::{DeepDepth, ResearchStatus, SearchConstraints, TaskId};
 pub use cost::{CostTracking, ProviderId, ProviderSpend};
-pub use crawler::Crawler;
 pub use deep::DeepResearch;
 pub use error::{
     BudgetExceededSnafu, DomainDeniedSnafu, Error, ErrorClass, FatalCorruptionSnafu,
@@ -124,6 +142,13 @@ pub use error::{
     TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu,
     UnsafeTargetSnafu, UnsupportedSnafu,
 };
+pub use evidence::decode::ContentCoding;
+pub use evidence::envelope::{
+    Acquisition, BodyRecord, EVIDENCE_SCHEMA_ID, EVIDENCE_SCHEMA_VERSION, EvidenceEnvelope,
+    ExtractionRecord, ExtractorId, Outcome, PartialReason, Producer, ReplayOutcome, replay,
+};
+pub use evidence::html_text::Segment;
+pub use evidence::media::{Charset, CharsetSource, Media};
 pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
 pub use freshness::{
     FreshnessBasis, FreshnessDecision, FreshnessPolicy, PublicationPrecision,

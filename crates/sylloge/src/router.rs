@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use snafu::ensure;
 use tokio::time::Instant;
 use url::Url;
 
 use crate::constraints::{DomainRule, SearchConstraints};
 use crate::cost::{CostTracking, ProviderSpend};
+use crate::digest::Sha256;
 use crate::error::{
     Error, InvalidConstraintSnafu, InvalidQuerySnafu, RateLimitedSnafu, Result, UnsupportedSnafu,
 };
@@ -32,10 +32,6 @@ use crate::result::{
 
 /// Domain tag opening every cache-key encoding.
 const CACHE_KEY_DOMAIN: &[u8] = b"zetesis.sylloge.router.cache_key.v1";
-
-const NIBBLE_BITS: u8 = 4;
-const NIBBLE_MASK: u8 = 0x0f;
-const HEX_RADIX: u32 = 16;
 
 /// Metadata key: provider that surfaced the hit.
 const META_PROVIDER: &str = "provider";
@@ -727,16 +723,10 @@ fn cache_key(query: &str, shape: QueryShape, constraints: &SearchConstraints) ->
     hasher.update(CACHE_KEY_DOMAIN);
     for part in [query.as_bytes(), shape.as_str().as_bytes(), &constraints] {
         let len = u64::try_from(part.len()).unwrap_or(u64::MAX);
-        hasher.update(len.to_be_bytes());
+        hasher.update(&len.to_be_bytes());
         hasher.update(part);
     }
-    let mut key = String::from("sha256:");
-    for byte in hasher.finalize() {
-        for nibble in [byte >> NIBBLE_BITS, byte & NIBBLE_MASK] {
-            key.extend(char::from_digit(u32::from(nibble), HEX_RADIX));
-        }
-    }
-    Ok(key)
+    Ok(format!("sha256:{}", hasher.finish_hex()))
 }
 
 #[cfg(test)]
