@@ -5,13 +5,33 @@ generated = false
 source_docs = [
   "README.md",
   "CLAUDE.md",
-  "kanon/projects/zetesis/STATE.md",
+  "docs/design/contract-baseline.md",
 ]
 
 [state]
-summary = "Zetesis is a Phase 1 scaffold repo with the locked four-crate workspace, translated sylloge provider/result/budget/deep-research surface, LocalDeepResearch in-memory lifecycle, and offline five-node loop fixture."
-current_phase = "Phase 1: scaffold."
-updated = "2026-08-07"
+summary = "Zetesis is pre-release. The four-crate workspace carries the sylloge typed surface (provider and deep-research traits, constraints with a fail-closed network-target check, citations, results, cost and in-memory budget arithmetic, in-memory LocalDeepResearch with an offline five-node fixture), re-exported by the zetesis facade. No provider adapter, HTTP client, cache, durable ledger, or model binding exists. docs/design/contract-baseline.md records what each public type enforces versus caller convention."
+current_phase = "Phase 00: contract baseline. S1 reconciles the implemented API and source docs with the accepted consumer boundaries."
+updated = "2026-09-25"
+
+[[recent]]
+date = "2026-09-25"
+item = "Recorded the contract baseline (docs/design/contract-baseline.md): public API inventory with enforced versus convention status, API delta, contract ownership with no consumer cycle, identity and idempotency, evidence envelope v1, resource dimensions, cancellation, error classification, and storage. Retired stale scaffold, paid-fallback, pricing, and host-command guidance across the source docs."
+
+[[recent]]
+date = "2026-08-26"
+item = "Hardened static acquisition boundaries: ValidatedTarget is immutable and non-forgeable, local targets require a non-cloneable, non-serializable LocalTargetAuthorization, and PageContent fields are private behind shared size limits."
+
+[[recent]]
+date = "2026-08-17"
+item = "Adopted the fleet license posture: code and tooling under PolyForm Noncommercial 1.0.0, documentation under CC BY-NC-ND 4.0."
+
+[[recent]]
+date = "2026-08-15"
+item = "Network-target check fails closed on non-web schemes, userinfo, and loopback, private, link-local, unspecified, multicast, or reserved resolved addresses."
+
+[[recent]]
+date = "2026-08-08"
+item = "Budget check-and-record became one in-memory operation (BudgetConstraint::try_reserve) with a fleet-day scope and builders; deep-research cancellation moved onto the trait with per-state rules; freshness checks separate publication time from retrieval time."
 
 [[recent]]
 date = "2026-05-26"
@@ -27,16 +47,24 @@ item = "LocalDeepResearch in-memory task lifecycle scaffold landed: submit/poll/
 
 [[recent]]
 date = "2026-05-25"
-item = "Translated the orphan zetesis-api/zetesis-types branch into the locked four-crate workspace; sylloge now owns the provider/result/budget surface and zetesis re-exports it."
-
-[[recent]]
-date = "2026-05-25"
-item = "Bootstrap zetesis facade crate landed so cargo workspace and security gates have a real target before Phase 1 implementation."
+item = "Translated the orphan zetesis-api/zetesis-types branch into the four-crate workspace; sylloge now owns the provider/result/budget surface and zetesis re-exports it."
 
 [[recent]]
 date = "2026-04-23"
-item = "Scope, four-crate decomposition, free-first provider tiers, and consumer-adapter pattern locked."
+item = "Scope, four-crate decomposition, free-first provider tiers, and consumer-adapter pattern accepted."
 
 [[open_threads]]
-name = "LocalDeepResearch HTTP backend"
-status = "No open GitHub issue currently tracks this (#10 closed 2026-05-29 as trait-contract complete; the remaining backend work was left untracked, which is the defect fixed in #58). Remaining scope: logismos vllm_openai adapter, DuckDuckGo/SearXNG HTTP clients, mock-endpoint integration tests. Offline fixture layer is in place. File a new issue before resuming this work and record its number in this field."
+name = "Bounded static acquisition"
+status = "Open, tracked by zetesis#48. Phase 01 S1 adds StaticAcquirer with private one-hop transport, per-hop validation, the Connector seam, and hop records, and retires Crawler and PageContent. Phase 01 S2 adds evidence envelope v1, fingerprint, replay, content decoding, and static extraction. Contract: docs/design/contract-baseline.md sections 7 to 10."
+
+[[open_threads]]
+name = "Paid-research authorization"
+status = "Open, tracked by zetesis#47 (reopened). Paid use stays disabled until a durable, identity-bound, fleet-scoped reservation ledger exists and authorization is carried through both Provider and DeepResearch. The in-memory BudgetConstraint::try_reserve is not that ledger."
+
+[[open_threads]]
+name = "Storage primitive selection"
+status = "Phase 03 S1. No primitive is selected and no storage crate is a dependency. Apply the kanon storage decision tree (transactional ledger to pinax, blobs to koina plus fjall); if those are not consumable, the phase is blocked upstream and tracked by an issue here rather than substituted with a raw store. No open issue tracks this yet."
+
+[[open_threads]]
+name = "Deep inquiry backend"
+status = "Phase 05. No open GitHub issue tracks this yet; file one before resuming and record its number here in prose. Remaining scope: model binding through the consumer-granted model contract (Logismos executes models), search through zetesis providers (SearXNG only as an explicitly registered endpoint), durable task identity with a consumer idempotency key, iteration, source, and token dimensions, and endpoint-backed integration tests. The in-memory lifecycle and offline fixture are in place."
