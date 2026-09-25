@@ -16,7 +16,8 @@ use crate::error::{InvalidConstraintSnafu, InvalidQuerySnafu, Result, Unsupporte
 use crate::net_policy::parse_domain_rules;
 use crate::provider::Provider;
 use crate::providers::{
-    META_ARXIV_ID, META_DOI, META_PAGEID, META_S2_PAPER_ID, META_YEAR, collapse_whitespace,
+    DoiIdentity, META_ARXIV_DOI, META_ARXIV_ID, META_DOI, META_PAGEID, META_S2_PAPER_ID, META_YEAR,
+    classify_doi, collapse_whitespace, normalize_arxiv_id,
 };
 use crate::query::QueryShape;
 use crate::result::{
@@ -59,8 +60,11 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 ///
 /// Every provider on the route is called in order and gets one receipt in
 /// [`ResearchResult::provenance`] ([`ProvenanceEntry::attempt`]): answered
-/// (with how many hits were dropped and why), empty, failed (with the
-/// error's class), or refused. A transient or permanent failure of one
+/// (with how many hits were dropped and why, and how many malformed
+/// records the provider dropped), empty, failed (with the error's class),
+/// or refused. [`ResearchResult::malformed_records`] sums the malformed
+/// counts, and [`ResearchResult::evidence_state`] reads the receipts to tell
+/// "nothing found" from "nobody answered". A transient or permanent failure of one
 /// provider does not stop the others; only a fatal error aborts the route.
 /// A paid-tier provider is refused unconditionally, whatever the caller's
 /// [`crate::BudgetConstraint`] says: paid spend needs a durable ledger
@@ -79,13 +83,17 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 ///
 /// 1. Hits sharing a stable identity (`doi`, `arxiv_id`, `s2_paper_id`, or
 ///    `pageid` on the same host) merge, unless another identity of the same
-///    kind disagrees.
+///    kind disagrees. An arXiv-registered DOI (`10.48550/arXiv.<id>`) counts
+///    as the arXiv identity it names, never as a `doi`, so a preprint's
+///    arXiv DOI and its journal DOI do not conflict.
 /// 2. Otherwise hits whose normalized titles (case-folded, punctuation
 ///    removed, whitespace collapsed) match merge only when both declare the
 ///    same `year` and no identity disagrees.
 ///
-/// A merged hit keeps the first record's fields, gains the other record's
-/// citations as corroboration, keeps the higher score, and lists each
+/// A merged hit keeps the first record's fields, adds any stable identity
+/// (`doi`, `arxiv_id`, `s2_paper_id`) it lacked from the records it
+/// absorbed, gains their citations as corroboration, keeps the higher
+/// score, and lists each
 /// absorbed record (provider, URL, title, metadata) under
 /// `merged_records`. Records that look alike but disagree (an identity
 /// conflict, or equal titles with different years) are both kept and name
@@ -173,24 +181,12 @@ impl Router {
             }
         );
         let screen = Screen::new(constraints, now)?;
-        let route: Vec<&Arc<dyn Provider>> = self
-            .providers
-            .iter()
-            .filter(|p| p.query_shapes().contains(&shape))
-            .collect();
-        ensure!(
-            !route.is_empty(),
-            UnsupportedSnafu {
-                reason: format!(
-                    "no registered provider serves query shape `{}`",
-                    shape.as_str()
-                ),
-            }
-        );
+        let route = self.route(shape)?;
         let cache_key = cache_key(&normalized, shape, &screen.canonical_constraints())?;
 
         let mut provenance = Vec::with_capacity(route.len());
         let mut cost = CostTracking::default();
+        let mut malformed_records = 0_usize;
         let mut candidates = Vec::new();
         for (index, provider) in route.into_iter().enumerate() {
             let tier = provider.tier();
@@ -201,7 +197,11 @@ impl Router {
             } else {
                 cost.add(ProviderSpend::new(provider.name(), 0, 1, 1));
                 match provider.search(query, constraints).await {
-                    Ok(result) => screen.admit(provider.name(), result.hits, &mut candidates),
+                    Ok(result) => {
+                        malformed_records =
+                            malformed_records.saturating_add(result.malformed_records);
+                        screen.admit(provider.name(), result, &mut candidates)
+                    }
                     Err(e) if e.is_fatal() => return Err(e),
                     Err(e) => AttemptOutcome::Failed {
                         class: e.class(),
@@ -218,9 +218,28 @@ impl Router {
         }
 
         let hits = merge(candidates, constraints.max_results);
-        Ok(ResearchResult::new(
-            query, shape, hits, provenance, cost, cache_key,
-        ))
+        let mut result = ResearchResult::new(query, shape, hits, provenance, cost, cache_key);
+        result.malformed_records = malformed_records;
+        Ok(result)
+    }
+
+    /// Registered providers that declare `shape`, in registration order.
+    fn route(&self, shape: QueryShape) -> Result<Vec<&Arc<dyn Provider>>> {
+        let route: Vec<&Arc<dyn Provider>> = self
+            .providers
+            .iter()
+            .filter(|p| p.query_shapes().contains(&shape))
+            .collect();
+        ensure!(
+            !route.is_empty(),
+            UnsupportedSnafu {
+                reason: format!(
+                    "no registered provider serves query shape `{}`",
+                    shape.as_str()
+                ),
+            }
+        );
+        Ok(route)
     }
 }
 
@@ -261,11 +280,13 @@ impl<'c> Screen<'c> {
     fn admit(
         &self,
         provider: &'static str,
-        hits: Vec<ResultHit>,
+        result: ResearchResult,
         candidates: &mut Vec<Candidate>,
     ) -> AttemptOutcome {
+        let malformed_records = result.malformed_records;
+        let hits = result.hits;
         let returned = hits.len();
-        if returned == 0 {
+        if returned == 0 && malformed_records == 0 {
             return AttemptOutcome::Empty;
         }
         let (mut by_domain, mut by_freshness, mut uncited) = (0, 0, 0);
@@ -290,6 +311,7 @@ impl<'c> Screen<'c> {
             rejected_by_freshness: by_freshness,
             rejected_by_domain: by_domain,
             rejected_uncited: uncited,
+            malformed_records,
         }
     }
 
@@ -334,12 +356,30 @@ impl Identity {
             Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),
             _ => None,
         });
-        Self {
-            doi: text(META_DOI),
-            arxiv_id: text(META_ARXIV_ID),
+        let mut ids = Self {
+            doi: None,
+            arxiv_id: text(META_ARXIV_ID)
+                .as_deref()
+                .and_then(normalize_arxiv_id)
+                .map(|(id, _version)| id),
             s2_paper_id: text(META_S2_PAPER_ID),
             pageid: pageid.map(|id| format!("{}:{id}", hit.url.host_str().unwrap_or_default())),
+        };
+        // WHY: an arXiv-registered DOI names the arXiv record, so it is that
+        // record's arXiv identity; comparing it as a DOI would set it
+        // against the publisher DOI of the same work.
+        for key in [META_DOI, META_ARXIV_DOI] {
+            match text(key).as_deref().and_then(classify_doi) {
+                Some(DoiIdentity::Publisher(doi)) => {
+                    ids.doi.get_or_insert(doi);
+                }
+                Some(DoiIdentity::Arxiv { id, .. }) => {
+                    ids.arxiv_id.get_or_insert(id);
+                }
+                None => {}
+            }
         }
+        ids
     }
 
     fn kinds(&self) -> [Option<&String>; 4] {
@@ -450,10 +490,21 @@ impl Merged {
     }
 
     fn into_hit(self) -> ResultHit {
-        let mut hit = self
-            .first
-            .hit
-            .with_metadata(META_PROVIDER, Value::from(self.first.provider));
+        let Candidate {
+            provider, hit, ids, ..
+        } = self.first;
+        let mut hit = hit.with_metadata(META_PROVIDER, Value::from(provider));
+        for (key, value) in [
+            (META_DOI, ids.doi),
+            (META_ARXIV_ID, ids.arxiv_id),
+            (META_S2_PAPER_ID, ids.s2_paper_id),
+        ] {
+            if let Some(value) = value {
+                hit.metadata
+                    .entry(key.to_owned())
+                    .or_insert_with(|| Value::from(value));
+            }
+        }
         if !self.absorbed.is_empty() {
             hit = hit.with_metadata(META_MERGED_RECORDS, Value::from(self.absorbed));
         }

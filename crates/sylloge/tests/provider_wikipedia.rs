@@ -19,7 +19,9 @@ const PARTIAL: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_parti
 const SCHEMA_CHANGED: &[u8] =
     include_bytes!("fixtures/providers/wikipedia/search_schema_changed.json");
 const MALFORMED: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_malformed.json");
-const MISSING_KEY: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_missing_key.json");
+const MALFORMED_RECORDS: &[u8] =
+    include_bytes!("fixtures/providers/wikipedia/search_malformed_records.json");
+const TYPE_CHANGED: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_type_changed.json");
 
 const USER_AGENT: &str = "zetesis-fixture/0.0 (https://example.org/contact) sylloge/0.0";
 
@@ -28,7 +30,9 @@ fn accessed() -> Timestamp {
 }
 
 fn parse_ok(body: &[u8]) -> Vec<ResultHit> {
-    Wikipedia::parse(200, &[], body, accessed()).unwrap()
+    let parsed = Wikipedia::parse(200, &[], body, accessed()).unwrap();
+    assert_eq!(parsed.malformed_records, 0, "no page is dropped");
+    parsed.hits
 }
 
 #[test]
@@ -181,11 +185,36 @@ fn malformed_body_is_a_provider_failure() {
 }
 
 #[test]
-fn page_without_a_key_fails_the_response_by_position() {
-    let err = Wikipedia::parse(200, &[], MISSING_KEY, accessed()).unwrap_err();
+fn pages_without_a_key_or_id_are_dropped_and_counted() {
+    let parsed = Wikipedia::parse(200, &[], MALFORMED_RECORDS, accessed()).unwrap();
+    assert_eq!(
+        parsed.malformed_records, 2,
+        "without a key there is no article URL; without an id no page identity"
+    );
+    let titles: Vec<&str> = parsed.hits.iter().map(|h| h.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["Complete page", "Another complete page"],
+        "the complete pages survive"
+    );
+    let scores: Vec<f32> = parsed.hits.iter().map(|h| h.score).collect();
+    assert_eq!(
+        scores,
+        [1.0, 0.25],
+        "survivors keep the rank the search gave them"
+    );
+}
+
+#[test]
+fn type_change_in_a_known_field_is_a_malformed_response() {
+    let err = Wikipedia::parse(200, &[], TYPE_CHANGED, accessed()).unwrap_err();
     assert!(
-        err.to_string().contains("result 2 has no `key`"),
-        "without a key there is no article URL: {err}"
+        matches!(err, Error::ProviderFailure { .. }),
+        "schema drift fails the whole response: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("malformed response: JSON"),
+        "the message names the defect: {err}"
     );
 }
 

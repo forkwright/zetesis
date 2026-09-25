@@ -8,10 +8,11 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    EndpointPolicy, HitParts, META_ARXIV_ID, META_AUTHORS, META_CORPUS_ID, META_DOI,
-    META_S2_PAPER_ID, META_VENUE, META_YEAR, ProviderRequest, accept_json, bounded_detail,
-    check_status, collapse_whitespace, endpoint_url, malformed, normalize_arxiv_id, normalize_doi,
-    required, result_limit, validated_query,
+    DoiIdentity, EndpointPolicy, HitParts, META_ARXIV_DOI, META_ARXIV_ID, META_AUTHORS,
+    META_CORPUS_ID, META_DOI, META_S2_PAPER_ID, META_VENUE, META_YEAR, ParsedResponse,
+    ProviderRequest, accept_json, bounded_detail, check_status, classify_doi, collapse_whitespace,
+    collect_records, endpoint_url, malformed, normalize_arxiv_id, required, result_limit,
+    validated_query,
 };
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
@@ -32,9 +33,6 @@ publicationDate,publicationTypes,authors";
 
 /// Paper resource path, the hit URL when a paper carries no website `url`.
 const PAPER_RESOURCE_BASE: &str = "https://api.semanticscholar.org/graph/v1/paper/";
-
-/// DOI prefix arXiv registers for its own preprints.
-const ARXIV_DOI_PREFIX: &str = "10.48550/arxiv.";
 
 /// `publicationTypes` values that mark a journal article. The query
 /// filter documents `JournalArticle`; the response schema's example spells
@@ -77,6 +75,8 @@ impl SemanticScholar {
             QueryShape::GeneralResearch,
             QueryShape::SemanticDiscovery,
         ],
+        language_scope: "the endpoint has no language parameter; \
+            `SearchConstraints::language` is ignored",
     };
 
     /// Build the search request for `query`, asking for at most
@@ -84,6 +84,8 @@ impl SemanticScholar {
     ///
     /// ASCII hyphens become spaces: the endpoint documents that hyphenated
     /// query terms yield no matches and says to replace them with spaces.
+    /// `constraints.language` is ignored; the endpoint has no language
+    /// parameter.
     ///
     /// # Errors
     ///
@@ -115,28 +117,27 @@ impl SemanticScholar {
     /// Parse a search response into hits in relevance order.
     ///
     /// Unknown fields are ignored and optional fields may be absent or
-    /// null; `paperId` and `title` are required on every paper.
+    /// null. A paper without `paperId` or `title`, or with an unparseable
+    /// `url`, is dropped and counted in
+    /// [`ParsedResponse::malformed_records`].
     ///
     /// # Errors
     ///
-    /// See the [response mapping](crate#provider-response-mapping); a paper without `paperId` or
-    /// `title`, or with an unparseable `url`, is a
-    /// [`crate::Error::ProviderFailure`].
+    /// See the [response mapping](crate#provider-response-mapping): a body
+    /// that is not the documented JSON shape, including a known field whose
+    /// type changed, is a [`crate::Error::ProviderFailure`].
     pub fn parse(
         status: u16,
         headers: &[(&str, &str)],
         body: &[u8],
         accessed_at: Timestamp,
-    ) -> Result<Vec<ResultHit>> {
+    ) -> Result<ParsedResponse> {
         check_status(PROVIDER, status, headers, accessed_at)?;
         let batch: SearchBatch = serde_json::from_slice(body)
             .map_err(|e| malformed(PROVIDER, format!("JSON: {}", bounded_detail(e))))?;
-        batch
-            .data
-            .into_iter()
-            .enumerate()
-            .map(|(rank, paper)| paper_hit(paper, rank, accessed_at))
-            .collect()
+        collect_records(batch.data, |paper, rank| {
+            paper_hit(paper, rank, accessed_at)
+        })
     }
 }
 
@@ -176,34 +177,28 @@ struct Author {
     name: Option<String>,
 }
 
-fn paper_hit(paper: Paper, rank: usize, accessed_at: Timestamp) -> Result<ResultHit> {
-    let position = rank.saturating_add(1);
-    let paper_id = required(PROVIDER, paper.id, position, "paperId")?;
-    let title = required(PROVIDER, paper.title, position, "title")?;
-    let url = match paper.url.as_deref() {
-        Some(raw) => Url::parse(raw).map_err(|e| {
-            malformed(
-                PROVIDER,
-                format!("result {position} has an unusable `url`: {e}"),
-            )
-        })?,
+/// The paper as a cited hit; `None` when it lacks `paperId` or `title`
+/// or carries an unparseable `url`.
+fn paper_hit(paper: Paper, rank: usize, accessed_at: Timestamp) -> Result<Option<ResultHit>> {
+    let (Some(paper_id), Some(title)) = (required(paper.id), required(paper.title)) else {
+        return Ok(None);
+    };
+    let url = match paper.url.as_deref().map(Url::parse) {
+        Some(Ok(url)) => url,
+        Some(Err(_)) => return Ok(None),
         None => paper_resource_url(&paper_id)?,
     };
-    let (doi, arxiv) = paper.external_ids.map_or((None, None), |ids| {
-        (
-            ids.doi.as_deref().and_then(normalize_doi),
-            ids.arxiv.as_deref().and_then(normalize_arxiv_id),
-        )
-    });
+    let ids = PaperIds::from(paper.external_ids);
     let source_kind = source_kind(
         paper.publication_types.as_deref().unwrap_or_default(),
-        doi.as_deref(),
-        arxiv.is_some(),
+        ids.doi.is_some(),
+        ids.arxiv_id.is_some(),
     );
 
     let mut metadata = vec![(META_S2_PAPER_ID, Value::from(paper_id))];
-    metadata.extend(doi.map(|doi| (META_DOI, Value::from(doi))));
-    metadata.extend(arxiv.map(|(id, _)| (META_ARXIV_ID, Value::from(id))));
+    metadata.extend(ids.doi.map(|doi| (META_DOI, Value::from(doi))));
+    metadata.extend(ids.arxiv_doi.map(|doi| (META_ARXIV_DOI, Value::from(doi))));
+    metadata.extend(ids.arxiv_id.map(|id| (META_ARXIV_ID, Value::from(id))));
     metadata.extend(paper.corpus_id.map(|id| (META_CORPUS_ID, Value::from(id))));
     metadata.extend(paper.year.map(|year| (META_YEAR, Value::from(year))));
     metadata.extend(
@@ -243,6 +238,42 @@ fn paper_hit(paper: Paper, rank: usize, accessed_at: Timestamp) -> Result<Result
         accessed_at,
     }
     .into_hit(&SemanticScholar::POLICY, metadata)
+    .map(Some)
+}
+
+/// A paper's publication identities. The DOI arXiv registers for its own
+/// record names the arXiv record, so it supplies the arXiv identifier when
+/// `ArXiv` is absent and never becomes the paper's `doi`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PaperIds {
+    doi: Option<String>,
+    arxiv_doi: Option<String>,
+    arxiv_id: Option<String>,
+}
+
+impl From<Option<ExternalIds>> for PaperIds {
+    fn from(ids: Option<ExternalIds>) -> Self {
+        let Some(ids) = ids else {
+            return Self::default();
+        };
+        let mut paper = Self {
+            arxiv_id: ids
+                .arxiv
+                .as_deref()
+                .and_then(normalize_arxiv_id)
+                .map(|(id, _version)| id),
+            ..Self::default()
+        };
+        match ids.doi.as_deref().and_then(classify_doi) {
+            Some(DoiIdentity::Publisher(doi)) => paper.doi = Some(doi),
+            Some(DoiIdentity::Arxiv { doi, id }) => {
+                paper.arxiv_doi = Some(doi);
+                paper.arxiv_id.get_or_insert(id);
+            }
+            None => {}
+        }
+        paper
+    }
 }
 
 fn paper_resource_url(paper_id: &str) -> Result<Url> {
@@ -257,16 +288,15 @@ fn paper_resource_url(paper_id: &str) -> Result<Url> {
 
 /// Conservative source kind: `Journal` only when the provider typed the
 /// paper a journal article; `Preprint` when arXiv is its only publication
-/// identity (no DOI, or only arXiv's own DOI); `Web` otherwise.
-fn source_kind(publication_types: &[String], doi: Option<&str>, has_arxiv: bool) -> SourceKind {
+/// identity (no publisher DOI); `Web` otherwise.
+fn source_kind(publication_types: &[String], has_doi: bool, has_arxiv: bool) -> SourceKind {
     if publication_types
         .iter()
         .any(|t| JOURNAL_ARTICLE_TYPES.contains(&t.as_str()))
     {
         return SourceKind::Journal;
     }
-    let doi_is_arxiv_or_absent = doi.is_none_or(|doi| doi.starts_with(ARXIV_DOI_PREFIX));
-    if has_arxiv && doi_is_arxiv_or_absent {
+    if has_arxiv && !has_doi {
         return SourceKind::Preprint;
     }
     SourceKind::Web
@@ -306,12 +336,12 @@ mod tests {
     #[test]
     fn journal_article_type_marks_a_journal() {
         assert_eq!(
-            source_kind(&types(&["JournalArticle", "Review"]), None, true),
+            source_kind(&types(&["JournalArticle", "Review"]), false, true),
             SourceKind::Journal,
             "documented filter spelling"
         );
         assert_eq!(
-            source_kind(&types(&["Journal Article"]), None, false),
+            source_kind(&types(&["Journal Article"]), false, false),
             SourceKind::Journal,
             "response-example spelling"
         );
@@ -320,25 +350,53 @@ mod tests {
     #[test]
     fn arxiv_only_identity_marks_a_preprint() {
         assert_eq!(
-            source_kind(&[], None, true),
+            source_kind(&[], false, true),
             SourceKind::Preprint,
-            "arXiv id and no DOI"
-        );
-        assert_eq!(
-            source_kind(&[], Some("10.48550/arxiv.1706.03762"), true),
-            SourceKind::Preprint,
-            "arXiv's own DOI is still an arXiv identity"
+            "arXiv identity and no publisher DOI"
         );
     }
 
     #[test]
     fn anything_else_is_web() {
         assert_eq!(
-            source_kind(&types(&["Conference"]), Some("10.1000/x"), true),
+            source_kind(&types(&["Conference"]), true, true),
             SourceKind::Web,
             "a publisher DOI without a journal type is not proof of a journal"
         );
-        assert_eq!(source_kind(&[], None, false), SourceKind::Web, "no signals");
+        assert_eq!(
+            source_kind(&[], false, false),
+            SourceKind::Web,
+            "no signals"
+        );
+    }
+
+    fn external(doi: Option<&str>, arxiv: Option<&str>) -> ExternalIds {
+        ExternalIds {
+            doi: doi.map(str::to_owned),
+            arxiv: arxiv.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn arxiv_datacite_doi_is_an_arxiv_identity_not_a_doi() {
+        assert_eq!(
+            PaperIds::from(Some(external(Some("10.48550/arXiv.2107.00005"), None))),
+            PaperIds {
+                doi: None,
+                arxiv_doi: Some("10.48550/arxiv.2107.00005".to_owned()),
+                arxiv_id: Some("2107.00005".to_owned()),
+            },
+            "the DataCite DOI supplies the arXiv identity"
+        );
+        assert_eq!(
+            PaperIds::from(Some(external(Some("10.5555/X"), Some("2107.00005v2")))),
+            PaperIds {
+                doi: Some("10.5555/x".to_owned()),
+                arxiv_doi: None,
+                arxiv_id: Some("2107.00005".to_owned()),
+            },
+            "a publisher DOI stays a DOI; the ArXiv id loses its version"
+        );
     }
 
     #[test]

@@ -6,17 +6,18 @@ pub use elenkhos as steelman;
 pub use sylloge::{
     Arxiv, AttemptOutcome, BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation,
     CostTracking, Crawler, DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, EndpointPolicy,
-    Error, ErrorClass, FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy,
-    InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization,
-    MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu, PageContent, PermanentIoSnafu,
-    ProvenanceEntry, Provider, ProviderAttempt, ProviderFailureSnafu, ProviderId, ProviderRequest,
-    ProviderSpend, ProviderTier, PublicationPrecision, PublicationProvenance, PublicationTime,
-    PublicationTimeCapability, QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimit,
-    RateLimitedSnafu, RefusalReason, ResearchResult, ResearchStatus, Resolver, Result, ResultHit,
-    Router, SearchConstraints, SemanticScholar, SourceKind, SourceRetriever, SpendEvent,
-    SpendLedger, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu, TaskUnavailableSnafu,
-    TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu,
-    ValidatedTarget, Wikipedia, evaluate_freshness,
+    Error, ErrorClass, EvidenceState, FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision,
+    FreshnessPolicy, InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch,
+    LocalTargetAuthorization, MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu,
+    PageContent, ParsedResponse, PermanentIoSnafu, ProvenanceEntry, Provider, ProviderAttempt,
+    ProviderFailureSnafu, ProviderId, ProviderRequest, ProviderSpend, ProviderTier,
+    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
+    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimit, RateLimitedSnafu, RefusalReason,
+    ResearchResult, ResearchStatus, Resolver, Result, ResultHit, Router, SearchConstraints,
+    SemanticScholar, SourceKind, SourceRetriever, SpendEvent, SpendLedger, Synthesizer,
+    SystemResolver, TaskId, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu,
+    TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
+    Wikipedia, evaluate_freshness,
 };
 pub use synopsis as briefing;
 
@@ -95,6 +96,23 @@ mod tests {
             paced.len(),
             2,
             "arXiv and Wikipedia document per-client limits"
+        );
+
+        let parsed: ParsedResponse = Wikipedia::parse(
+            200,
+            &[],
+            br#"{"pages":[]}"#,
+            "2026-09-25T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            parsed.hits.is_empty() && parsed.malformed_records == 0,
+            "an empty page list parses through the facade"
+        );
+        assert_eq!(
+            ResearchResult::empty("q", QueryShape::QuickFactual, "k").evidence_state(),
+            EvidenceState::Unanswered,
+            "evidence state is reachable through the facade"
         );
 
         let router = Router::new(Vec::new()).unwrap();

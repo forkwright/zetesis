@@ -17,7 +17,8 @@ const PARTIAL: &[u8] = include_bytes!("fixtures/providers/arxiv/search_partial.x
 const SCHEMA_CHANGED: &[u8] = include_bytes!("fixtures/providers/arxiv/search_schema_changed.xml");
 const MALFORMED: &[u8] = include_bytes!("fixtures/providers/arxiv/search_malformed.xml");
 const TRUNCATED: &[u8] = include_bytes!("fixtures/providers/arxiv/search_truncated.xml");
-const MISSING_TITLE: &[u8] = include_bytes!("fixtures/providers/arxiv/search_missing_title.xml");
+const MALFORMED_RECORDS: &[u8] =
+    include_bytes!("fixtures/providers/arxiv/search_malformed_records.xml");
 const NOT_ATOM: &[u8] = include_bytes!("fixtures/providers/arxiv/not_atom.xml");
 const API_ERROR: &[u8] = include_bytes!("fixtures/providers/arxiv/api_error_documented.xml");
 
@@ -26,7 +27,9 @@ fn accessed() -> Timestamp {
 }
 
 fn parse_ok(body: &[u8]) -> Vec<ResultHit> {
-    Arxiv::parse(200, &[], body, accessed()).unwrap()
+    let parsed = Arxiv::parse(200, &[], body, accessed()).unwrap();
+    assert_eq!(parsed.malformed_records, 0, "no entry is dropped");
+    parsed.hits
 }
 
 fn search_query(max_results: usize, query: &str) -> Vec<(String, String)> {
@@ -273,11 +276,27 @@ fn a_document_that_is_not_a_feed_is_refused() {
 }
 
 #[test]
-fn entry_without_a_title_fails_the_response_by_position() {
-    let err = Arxiv::parse(200, &[], MISSING_TITLE, accessed()).unwrap_err();
-    assert!(
-        err.to_string().contains("result 2 has no `title`"),
-        "the message names the entry and field: {err}"
+fn entries_without_a_title_or_abstract_identity_are_dropped_and_counted() {
+    let parsed = Arxiv::parse(200, &[], MALFORMED_RECORDS, accessed()).unwrap();
+    assert_eq!(
+        parsed.malformed_records, 2,
+        "the untitled entry and the non-abstract identifier are dropped"
+    );
+    let ids: Vec<&serde_json::Value> = parsed
+        .hits
+        .iter()
+        .filter_map(|h| h.metadata.get("arxiv_id"))
+        .collect();
+    assert_eq!(
+        ids,
+        [&json!("2106.00006"), &json!("2106.00009")],
+        "the complete entries survive"
+    );
+    let scores: Vec<f32> = parsed.hits.iter().map(|h| h.score).collect();
+    assert_eq!(
+        scores,
+        [1.0, 0.25],
+        "survivors keep the rank the feed gave them"
     );
 }
 

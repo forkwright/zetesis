@@ -8,9 +8,10 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    EndpointPolicy, HitParts, META_ARXIV_ID, META_ARXIV_VERSION, META_AUTHORS, META_DOI, META_YEAR,
-    ProviderRequest, RateLimit, bounded_detail, check_status, collapse_whitespace, endpoint_url,
-    malformed, normalize_arxiv_id, normalize_doi, required, result_limit, validated_query,
+    DoiIdentity, EndpointPolicy, HitParts, META_ARXIV_DOI, META_ARXIV_ID, META_ARXIV_VERSION,
+    META_AUTHORS, META_DOI, META_YEAR, ParsedResponse, ProviderRequest, RateLimit, bounded_detail,
+    check_status, classify_doi, collapse_whitespace, collect_records, endpoint_url, malformed,
+    normalize_arxiv_id, required, result_limit, validated_query,
 };
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
@@ -74,6 +75,8 @@ impl Arxiv {
         terms: "https://info.arxiv.org/help/api/tou.html",
         license: "CC0-1.0",
         query_shapes: &[QueryShape::AcademicLiterature],
+        language_scope: "the query API has no language parameter; \
+            `SearchConstraints::language` is ignored",
     };
 
     /// Build the query request for `query`, asking for at most
@@ -82,6 +85,8 @@ impl Arxiv {
     /// The query is treated as plain text: each whitespace-separated term
     /// becomes a quoted `all:` term, so query text cannot inject field
     /// prefixes, boolean operators, or grouping into the search.
+    /// `constraints.language` is ignored; the API has no language
+    /// parameter.
     ///
     /// # Errors
     ///
@@ -118,24 +123,26 @@ impl Arxiv {
     /// Parse an Atom feed into hits in the API's order.
     ///
     /// Elements are matched by namespace, so unknown elements and
-    /// attributes are ignored; `<id>` (an abstract-page URL) and `<title>`
-    /// are required on every entry. The citation's publication time is
-    /// `<updated>`, the submission time of the version retrieved;
+    /// attributes are ignored. An entry without `<title>`, without an
+    /// `<id>` that is an arXiv abstract-page URL, or with an unparseable
+    /// abstract link is dropped and counted in
+    /// [`ParsedResponse::malformed_records`]. The citation's publication
+    /// time is `<updated>`, the submission time of the version retrieved;
     /// `<published>` (first version) is kept in metadata.
     ///
     /// # Errors
     ///
-    /// See the [response mapping](crate#provider-response-mapping). A feed whose entry is the
-    /// API's error entry is a [`crate::Error::InvalidQuery`] carrying the
-    /// API's error code; a document that is not a well-formed Atom feed, or
-    /// an entry without a usable `<id>` or `<title>`, is a
+    /// See the [response mapping](crate#provider-response-mapping). A feed
+    /// whose entry is the API's error entry is a
+    /// [`crate::Error::InvalidQuery`] carrying the API's error code; a
+    /// document that is not a well-formed Atom feed is a
     /// [`crate::Error::ProviderFailure`].
     pub fn parse(
         status: u16,
         headers: &[(&str, &str)],
         body: &[u8],
         accessed_at: Timestamp,
-    ) -> Result<Vec<ResultHit>> {
+    ) -> Result<ParsedResponse> {
         check_status(PROVIDER, status, headers, accessed_at)?;
         let entries = read_feed(body)?;
         if let Some(code) = entries.iter().find_map(RawEntry::api_error_code) {
@@ -144,11 +151,7 @@ impl Arxiv {
             }
             .build());
         }
-        entries
-            .into_iter()
-            .enumerate()
-            .map(|(rank, entry)| entry_hit(entry, rank, accessed_at))
-            .collect()
+        collect_records(entries, |entry, rank| entry_hit(entry, rank, accessed_at))
     }
 }
 
@@ -439,16 +442,15 @@ fn xml_error(error: &dyn std::fmt::Display) -> Error {
     malformed(PROVIDER, format!("XML: {}", bounded_detail(error)))
 }
 
-fn entry_hit(entry: RawEntry, rank: usize, accessed_at: Timestamp) -> Result<ResultHit> {
-    let position = rank.saturating_add(1);
-    let id = required(PROVIDER, entry.id, position, "id")?;
-    let title = required(PROVIDER, entry.title, position, "title")?;
-    let (arxiv_id, id_version) = abstract_identity(&id).ok_or_else(|| {
-        malformed(
-            PROVIDER,
-            format!("result {position} `id` is not an arXiv abstract URL"),
-        )
-    })?;
+/// The entry as a cited hit; `None` when it lacks a title or a usable
+/// abstract-page identity.
+fn entry_hit(entry: RawEntry, rank: usize, accessed_at: Timestamp) -> Result<Option<ResultHit>> {
+    let (Some(id), Some(title)) = (required(entry.id), required(entry.title)) else {
+        return Ok(None);
+    };
+    let Some((arxiv_id, id_version)) = abstract_identity(&id) else {
+        return Ok(None);
+    };
     let alternate = entry.alternate.filter(|href| !href.is_empty());
     let version = id_version.or_else(|| {
         alternate
@@ -456,13 +458,9 @@ fn entry_hit(entry: RawEntry, rank: usize, accessed_at: Timestamp) -> Result<Res
             .and_then(abstract_identity)
             .and_then(|(_, version)| version)
     });
-    let landing = alternate.as_deref().unwrap_or(&id);
-    let url = Url::parse(landing).map_err(|e| {
-        malformed(
-            PROVIDER,
-            format!("result {position} has an unusable abstract URL: {e}"),
-        )
-    })?;
+    let Ok(url) = Url::parse(alternate.as_deref().unwrap_or(&id)) else {
+        return Ok(None);
+    };
     let published = entry.published.map(|p| p.trim().to_owned());
 
     let mut metadata = vec![(META_ARXIV_ID, Value::from(arxiv_id))];
@@ -471,8 +469,11 @@ fn entry_hit(entry: RawEntry, rank: usize, accessed_at: Timestamp) -> Result<Res
         entry
             .doi
             .as_deref()
-            .and_then(normalize_doi)
-            .map(|doi| (META_DOI, Value::from(doi))),
+            .and_then(classify_doi)
+            .map(|doi| match doi {
+                DoiIdentity::Publisher(doi) => (META_DOI, Value::from(doi)),
+                DoiIdentity::Arxiv { doi, .. } => (META_ARXIV_DOI, Value::from(doi)),
+            }),
     );
     let authors = names(entry.authors);
     if !authors.is_empty() {
@@ -505,6 +506,7 @@ fn entry_hit(entry: RawEntry, rank: usize, accessed_at: Timestamp) -> Result<Res
         accessed_at,
     }
     .into_hit(&Arxiv::POLICY, metadata)
+    .map(Some)
 }
 
 /// The arXiv identifier and version named by an abstract-page URL.

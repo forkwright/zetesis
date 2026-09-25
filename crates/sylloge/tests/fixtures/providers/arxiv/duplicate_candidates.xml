@@ -38,4 +38,14 @@
     <author><name>Fern Proxy</name></author>
     <link href="http://arxiv.org/abs/2005.00004v1" rel="alternate" type="text/html"/>
   </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2107.00005v3</id>
+    <published>2021-07-01T10:00:00-04:00</published>
+    <updated>2021-09-15T10:00:00-04:00</updated>
+    <title>An arXiv DOI meets a journal DOI</title>
+    <summary>Semantic Scholar knows this paper only by arXiv's DataCite DOI; arXiv lists its journal DOI.</summary>
+    <author><name>Hollis Surrogate</name></author>
+    <arxiv:doi>10.5555/synthetic.2021.555</arxiv:doi>
+    <link href="http://arxiv.org/abs/2107.00005v3" rel="alternate" type="text/html"/>
+  </entry>
 </feed>

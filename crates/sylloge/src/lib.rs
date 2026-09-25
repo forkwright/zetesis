@@ -31,18 +31,21 @@
 //! [`SemanticScholar`], [`Arxiv`], and [`Wikipedia`] are the first Tier-0
 //! cohort. Each is a pure request builder (`request`: query and
 //! [`SearchConstraints`] to a [`ProviderRequest`]) and a structured parser
-//! (`parse`: HTTP status, headers, body, and access time to cited
-//! [`ResultHit`]s), with an [`EndpointPolicy`] recording the endpoint's
-//! documented terms. Their `Provider` implementations, and the pacing each
-//! policy records, land with the HTTP transport.
+//! (`parse`: HTTP status, headers, body, and access time to a
+//! [`ParsedResponse`] of cited [`ResultHit`]s), with an [`EndpointPolicy`]
+//! recording the endpoint's documented terms. Their `Provider`
+//! implementations, and the pacing each policy records, land with the HTTP
+//! transport. All three serve one language scope and ignore
+//! [`SearchConstraints::language`] ([`EndpointPolicy::language_scope`]).
 //!
 //! ## Provider response mapping
 //!
 //! | Response | Result |
 //! |---|---|
-//! | 200 with results | `Ok(hits)` in provider rank order |
-//! | 200 with an empty result list | `Ok(vec![])` |
-//! | 200 whose body does not parse, or lacks a required field | [`Error::ProviderFailure`] naming the defect |
+//! | 200 with results | `Ok` with hits in provider rank order |
+//! | 200 with an empty result list | `Ok` with no hits |
+//! | 200 with a record that lacks a required field, or whose identity or URL is unusable | that record dropped and counted in [`ParsedResponse::malformed_records`]; the rest keep their rank |
+//! | 200 whose body does not parse, or whose known field changed type | [`Error::ProviderFailure`] naming the defect |
 //! | 400, 414, 422 | [`Error::InvalidQuery`] |
 //! | 401, 403 | [`Error::Unauthorized`] |
 //! | 429 | [`Error::RateLimited`], with `Retry-After` in milliseconds when present |
@@ -65,10 +68,12 @@
 //! source payload.
 //!
 //! Metadata keys, each present only when the provider supplied the value:
-//! `doi` (lowercased, no resolver prefix), `arxiv_id` (no version),
-//! `arxiv_version`, `s2_paper_id`, `corpus_id`, `pageid`, `authors` (names in
-//! order), `year`, `venue`, `license`, and `provider_policy_revision` (the
-//! [`EndpointPolicy::revision`] the request was built under).
+//! `doi` (a publisher DOI, lowercased, no resolver prefix), `arxiv_doi`
+//! (the DOI arXiv registers for its own record, which also supplies
+//! `arxiv_id`), `arxiv_id` (no version), `arxiv_version`, `s2_paper_id`, `corpus_id`, `pageid`,
+//! `authors` (names in order), `year`, `venue`, `license`, and
+//! `provider_policy_revision` (the [`EndpointPolicy::revision`] the request
+//! was built under).
 //!
 //! # Error taxonomy
 //!
@@ -126,11 +131,12 @@ pub use local_deep_research::LocalDeepResearch;
 pub use net_policy::{LocalTargetAuthorization, Resolver, SystemResolver, ValidatedTarget};
 pub use provider::{BoxFut, Provider};
 pub use providers::{
-    Arxiv, EndpointPolicy, ProviderRequest, RateLimit, SemanticScholar, Wikipedia,
+    Arxiv, EndpointPolicy, ParsedResponse, ProviderRequest, RateLimit, SemanticScholar, Wikipedia,
 };
 pub use query::QueryShape;
 pub use result::{
-    AttemptOutcome, ProvenanceEntry, ProviderAttempt, RefusalReason, ResearchResult, ResultHit,
+    AttemptOutcome, EvidenceState, ProvenanceEntry, ProviderAttempt, RefusalReason, ResearchResult,
+    ResultHit,
 };
 pub use router::Router;
 pub use tier::ProviderTier;

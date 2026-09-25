@@ -13,9 +13,10 @@ use jiff::Timestamp;
 use serde_json::{Value, json};
 use sylloge::{
     Arxiv, AttemptOutcome, BoxFut, BudgetConstraint, Citation, CostTracking, Error, ErrorClass,
-    FatalCorruptionSnafu, FreshnessBasis, FreshnessPolicy, Provider, ProviderAttempt, ProviderTier,
-    QueryShape, RateLimitedSnafu, RefusalReason, ResearchResult, Result, ResultHit, Router,
-    SearchConstraints, SemanticScholar, SourceKind, UnauthorizedSnafu, Wikipedia,
+    EvidenceState, FatalCorruptionSnafu, FreshnessBasis, FreshnessPolicy, Provider,
+    ProviderAttempt, ProviderTier, QueryShape, RateLimitedSnafu, RefusalReason, ResearchResult,
+    Result, ResultHit, Router, SearchConstraints, SemanticScholar, SourceKind, UnauthorizedSnafu,
+    Wikipedia,
 };
 use url::Url;
 
@@ -48,6 +49,8 @@ fn now() -> Timestamp {
 
 enum Reply {
     Hits(Vec<ResultHit>),
+    /// Hits plus a count of records the provider dropped as malformed.
+    Parsed(Vec<ResultHit>, usize),
     Fail(fn() -> Error),
 }
 
@@ -104,17 +107,21 @@ impl Provider for Stub {
     ) -> BoxFut<'a, Result<ResearchResult>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            match &self.reply {
-                Reply::Hits(hits) => Ok(ResearchResult::new(
-                    query,
-                    QueryShape::GeneralResearch,
-                    hits.clone(),
-                    Vec::new(),
-                    CostTracking::default(),
-                    "stub",
-                )),
-                Reply::Fail(make) => Err(make()),
-            }
+            let (hits, malformed_records) = match &self.reply {
+                Reply::Hits(hits) => (hits.clone(), 0),
+                Reply::Parsed(hits, malformed) => (hits.clone(), *malformed),
+                Reply::Fail(make) => return Err(make()),
+            };
+            let mut result = ResearchResult::new(
+                query,
+                QueryShape::GeneralResearch,
+                hits,
+                Vec::new(),
+                CostTracking::default(),
+                "stub",
+            );
+            result.malformed_records = malformed_records;
+            Ok(result)
         })
     }
 }
@@ -124,15 +131,18 @@ fn empty() -> Reply {
 }
 
 fn s2_hits(body: &[u8]) -> Reply {
-    Reply::Hits(SemanticScholar::parse(200, &[], body, now()).unwrap())
+    let parsed = SemanticScholar::parse(200, &[], body, now()).unwrap();
+    Reply::Parsed(parsed.hits, parsed.malformed_records)
 }
 
 fn arxiv_hits(body: &[u8]) -> Reply {
-    Reply::Hits(Arxiv::parse(200, &[], body, now()).unwrap())
+    let parsed = Arxiv::parse(200, &[], body, now()).unwrap();
+    Reply::Parsed(parsed.hits, parsed.malformed_records)
 }
 
 fn wikipedia_hits() -> Reply {
-    Reply::Hits(Wikipedia::parse(200, &[], WIKIPEDIA_RECORDED, now()).unwrap())
+    let parsed = Wikipedia::parse(200, &[], WIKIPEDIA_RECORDED, now()).unwrap();
+    Reply::Parsed(parsed.hits, parsed.malformed_records)
 }
 
 /// The first cohort in its canonical registration order, each stub
@@ -204,6 +214,7 @@ fn answered(returned: usize) -> AttemptOutcome {
         "rejected_by_freshness": 0,
         "rejected_by_domain": 0,
         "rejected_uncited": 0,
+        "malformed_records": 0,
     }))
     .unwrap()
 }
@@ -604,7 +615,7 @@ async fn conflicting_identities_keep_both_records() {
     assert_eq!(
         conflicting.len(),
         2,
-        "same arXiv id but different DOIs: both records are kept"
+        "same arXiv id but different publisher DOIs: both records are kept"
     );
     for record in conflicting {
         assert_eq!(record.citations.len(), 1, "neither absorbed the other");
@@ -645,8 +656,9 @@ async fn a_title_and_year_match_without_conflicting_identity_merges() {
             "Conflicting Identifiers in Practice",
             "Conflicting Identifiers in Practice",
             "Same Title, Same Year",
+            "An arXiv DOI Meets a Journal DOI",
         ],
-        "eight records become six hits, by score then route order"
+        "ten records become seven hits, by score then route order"
     );
 }
 
@@ -667,6 +679,7 @@ async fn strict_freshness_drops_undated_hits_and_counts_them() {
             "rejected_by_freshness": 2,
             "rejected_by_domain": 0,
             "rejected_uncited": 0,
+            "malformed_records": 0,
         }))
         .unwrap(),
         "the drop is counted in the receipt"
@@ -819,8 +832,8 @@ async fn max_results_caps_the_answer_and_never_pads_it() {
     .await;
     assert_eq!(
         generous.hits.len(),
-        5,
-        "five records with the DOI conflict kept apart: five hits, no filler"
+        4,
+        "five records, the arXiv preprint merged by its DataCite DOI: four hits, no filler"
     );
 }
 
@@ -851,6 +864,200 @@ async fn uncited_hits_are_dropped_and_counted() {
             }
         ),
         "the drop is counted"
+    );
+}
+
+#[tokio::test]
+async fn an_arxiv_datacite_doi_merges_with_the_record_carrying_the_journal_doi() {
+    let (router, _) = cohort(
+        empty(),
+        s2_hits(S2_DUPLICATES),
+        arxiv_hits(ARXIV_DUPLICATES),
+    );
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+
+    let merged = hit(&result, "An arXiv DOI Meets a Journal DOI");
+    assert_eq!(
+        merged.citations.len(),
+        2,
+        "the DataCite DOI 10.48550/arXiv.2107.00005 is arXiv 2107.00005"
+    );
+    assert_eq!(
+        merged.metadata.get("arxiv_id"),
+        Some(&json!("2107.00005")),
+        "the arXiv identity, version removed"
+    );
+    assert_eq!(
+        merged.metadata.get("arxiv_doi"),
+        Some(&json!("10.48550/arxiv.2107.00005")),
+        "the DataCite DOI stays on record"
+    );
+    assert_eq!(
+        merged.metadata.get("doi"),
+        Some(&json!("10.5555/synthetic.2021.555")),
+        "the journal DOI from the absorbed arXiv record is carried as its own identity"
+    );
+    assert!(
+        !merged.metadata.contains_key("conflicts_with"),
+        "an arXiv DOI and a journal DOI do not conflict"
+    );
+    assert!(
+        result
+            .hits
+            .iter()
+            .all(|h| h.title != "An arXiv DOI meets a journal DOI"),
+        "the arXiv record does not survive as a separate hit"
+    );
+}
+
+#[tokio::test]
+async fn malformed_records_are_counted_in_the_receipt_and_the_result() {
+    const MALFORMED_S2: &[u8] =
+        include_bytes!("fixtures/providers/semantic_scholar/search_malformed_records.json");
+    const MALFORMED_ARXIV: &[u8] =
+        include_bytes!("fixtures/providers/arxiv/search_malformed_records.xml");
+    let (router, _) = cohort(empty(), s2_hits(MALFORMED_S2), arxiv_hits(MALFORMED_ARXIV));
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+    for provider in ["semantic_scholar", "arxiv"] {
+        assert!(
+            matches!(
+                outcome(&result, provider),
+                AttemptOutcome::Answered {
+                    returned: 2,
+                    malformed_records: 2,
+                    ..
+                }
+            ),
+            "{provider}: two hits kept, two records dropped"
+        );
+    }
+    assert_eq!(
+        result.malformed_records, 4,
+        "the routed result sums the drops"
+    );
+    assert_eq!(result.hits.len(), 4, "the surviving records are answered");
+}
+
+#[tokio::test]
+async fn a_provider_whose_records_were_all_malformed_answered_without_evidence() {
+    let stub = Stub::new(
+        "wikipedia",
+        &[QueryShape::QuickFactual],
+        Reply::Parsed(Vec::new(), 3),
+    );
+    let router = router_of(&[stub]);
+    let result = search(
+        &router,
+        QueryShape::QuickFactual,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome(&result, "wikipedia"),
+            AttemptOutcome::Answered {
+                returned: 0,
+                malformed_records: 3,
+                ..
+            }
+        ),
+        "dropped records are not an empty answer"
+    );
+    assert_eq!(result.evidence_state(), EvidenceState::NoEvidence);
+}
+
+#[tokio::test]
+async fn evidence_state_is_answered_when_a_hit_survives() {
+    let (router, _) = cohort(
+        empty(),
+        Reply::Fail(|| {
+            RateLimitedSnafu {
+                provider: "semantic_scholar",
+                retry_after_ms: None::<u64>,
+            }
+            .build()
+        }),
+        arxiv_hits(ARXIV_DOCUMENTED),
+    );
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        result.evidence_state(),
+        EvidenceState::Answered,
+        "one provider's hits are evidence even when another failed"
+    );
+}
+
+#[tokio::test]
+async fn evidence_state_is_no_evidence_when_a_provider_answered_and_nothing_survived() {
+    let (router, _) = cohort(empty(), empty(), empty());
+    let empty_answer = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        empty_answer.evidence_state(),
+        EvidenceState::NoEvidence,
+        "providers answered with no hits"
+    );
+
+    let (router, _) = cohort(wikipedia_hits(), empty(), empty());
+    let strict = SearchConstraints::default().with_freshness(Duration::from_secs(86_400));
+    let screened_out = search(&router, QueryShape::QuickFactual, &strict).await;
+    assert_eq!(
+        screened_out.evidence_state(),
+        EvidenceState::NoEvidence,
+        "a provider answered and the caller's screens dropped every hit"
+    );
+}
+
+#[tokio::test]
+async fn evidence_state_is_unanswered_when_every_provider_failed_or_was_refused() {
+    let failed = Stub::new(
+        "semantic_scholar",
+        &[QueryShape::AcademicLiterature],
+        Reply::Fail(|| {
+            UnauthorizedSnafu {
+                provider: "semantic_scholar",
+                message: "HTTP 403",
+            }
+            .build()
+        }),
+    );
+    let paid = Stub::tiered(
+        "paid_deep",
+        ProviderTier::Tier3PaidDeep,
+        &[QueryShape::AcademicLiterature],
+        Reply::Hits(vec![web_hit("Paid", "https://paid.example/c")]),
+    );
+    let router = router_of(&[failed, paid]);
+    let result = search(
+        &router,
+        QueryShape::AcademicLiterature,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert!(result.hits.is_empty(), "no hits either way");
+    assert_eq!(
+        result.evidence_state(),
+        EvidenceState::Unanswered,
+        "total failure is not reported as absence of evidence"
     );
 }
 

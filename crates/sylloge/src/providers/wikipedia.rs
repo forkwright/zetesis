@@ -8,9 +8,9 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    EndpointPolicy, HitParts, META_PAGEID, ProviderRequest, RateLimit, accept_json, bounded_detail,
-    check_status, collapse_whitespace, endpoint_url, malformed, required, result_limit,
-    validated_query,
+    EndpointPolicy, HitParts, META_PAGEID, ParsedResponse, ProviderRequest, RateLimit, accept_json,
+    bounded_detail, check_status, collapse_whitespace, collect_records, endpoint_url, malformed,
+    required, result_limit, validated_query,
 };
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
@@ -79,6 +79,8 @@ impl Wikipedia {
         terms: "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
         license: "CC-BY-SA-4.0",
         query_shapes: &[QueryShape::QuickFactual, QueryShape::GeneralResearch],
+        language_scope: "English Wikipedia only; `SearchConstraints::language` is ignored, \
+            not mapped to another language edition",
     };
 
     /// Configure the provider with the caller's User-Agent, in the form the
@@ -115,6 +117,8 @@ impl Wikipedia {
 
     /// Build the search request for `query`, asking for at most
     /// `constraints.max_results` pages (capped at the endpoint's 100).
+    /// Requests go to English Wikipedia; `constraints.language` is ignored
+    /// rather than mapped to another language edition.
     ///
     /// # Errors
     ///
@@ -136,29 +140,27 @@ impl Wikipedia {
     /// Parse a search response into hits in search order.
     ///
     /// Unknown fields are ignored and optional fields may be absent or
-    /// null; `id`, `key`, and `title` are required on every page. The
-    /// endpoint reports no timestamps, so every citation's publication
-    /// time is `Unknown`.
+    /// null. A page without `id`, `key`, or `title` is dropped and counted
+    /// in [`ParsedResponse::malformed_records`]. The endpoint reports no
+    /// timestamps, so every citation's publication time is `Unknown`.
     ///
     /// # Errors
     ///
-    /// See the [response mapping](crate#provider-response-mapping); a page without `id`, `key`,
-    /// or `title` is a [`crate::Error::ProviderFailure`].
+    /// See the [response mapping](crate#provider-response-mapping): a body
+    /// that is not the documented JSON shape, including a known field whose
+    /// type changed, is a [`crate::Error::ProviderFailure`].
     pub fn parse(
         status: u16,
         headers: &[(&str, &str)],
         body: &[u8],
         accessed_at: Timestamp,
-    ) -> Result<Vec<ResultHit>> {
+    ) -> Result<ParsedResponse> {
         check_status(PROVIDER, status, headers, accessed_at)?;
         let response: SearchResponse = serde_json::from_slice(body)
             .map_err(|e| malformed(PROVIDER, format!("JSON: {}", bounded_detail(e))))?;
-        response
-            .pages
-            .into_iter()
-            .enumerate()
-            .map(|(rank, page)| page_hit(page, rank, accessed_at))
-            .collect()
+        collect_records(response.pages, |page, rank| {
+            page_hit(page, rank, accessed_at)
+        })
     }
 }
 
@@ -177,16 +179,12 @@ struct Page {
     matched_title: Option<String>,
 }
 
-fn page_hit(page: Page, rank: usize, accessed_at: Timestamp) -> Result<ResultHit> {
-    let position = rank.saturating_add(1);
-    let pageid = page
-        .id
-        .ok_or_else(|| malformed(PROVIDER, format!("result {position} has no `id`")))?;
-    let key = page
-        .key
-        .filter(|k| !k.trim().is_empty())
-        .ok_or_else(|| malformed(PROVIDER, format!("result {position} has no `key`")))?;
-    let title = required(PROVIDER, page.title, position, "title")?;
+/// The page as a cited hit; `None` when it lacks `id`, `key`, or `title`.
+fn page_hit(page: Page, rank: usize, accessed_at: Timestamp) -> Result<Option<ResultHit>> {
+    let key = page.key.filter(|k| !k.trim().is_empty());
+    let (Some(pageid), Some(key), Some(title)) = (page.id, key, required(page.title)) else {
+        return Ok(None);
+    };
     let url = article_url(&key)?;
 
     let mut metadata = vec![
@@ -219,6 +217,7 @@ fn page_hit(page: Page, rank: usize, accessed_at: Timestamp) -> Result<ResultHit
         accessed_at,
     }
     .into_hit(&Wikipedia::POLICY, metadata)
+    .map(Some)
 }
 
 /// The article URL for a page `key`, the key percent-encoded as one path

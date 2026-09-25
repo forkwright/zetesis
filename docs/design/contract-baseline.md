@@ -26,6 +26,12 @@ licensed under [CC BY-NC-ND 4.0](../../LICENSE-DOCS).
 Source citations use `file:line` at the baseline revision. Paths are relative
 to `crates/sylloge/src/` unless a path is given.
 
+> **Superseded by Phase 03 S2.** Phase 03 S2 added the `Router`, provider
+> attempt receipts, and request builders and parsers for Semantic Scholar,
+> arXiv, and Wikipedia. Cells marked *Phase 03 S2* in sections 3.1, 3.4,
+> 3.8, and 6 state the contract after that change. Every other cell, and
+> every `file:line` citation, describes the baseline revision.
+
 ## 2. Enforcement legend
 
 | Status | Meaning |
@@ -45,7 +51,7 @@ behavior.
 | Item | Enforced | Caller convention today | Status |
 |------|----------|-------------------------|--------|
 | `BoxFut` (`provider.rs:25`) | `Send` boxed future; keeps the three traits dyn-compatible. | None. | Implemented |
-| `Provider` (`provider.rs:51-84`) | Object safety; `search(query: &str, constraints: &SearchConstraints)` signature (`provider.rs:79-83`). `publication_time_capability` defaults to `Unsupported` (`provider.rs:67-69`). | Unique lowercase `name()` (`provider.rs:35-37`); honoring `max_results`, domain lists, language, and freshness; cancellation safety when the future is dropped (`provider.rs:44-50`). `search` receives no consumer identity, ledger handle, attempt identity, or credential reference, so it cannot authorize or charge anything. | Trait implemented; no provider adapter exists |
+| `Provider` (`provider.rs:51-84`) | Object safety; `search(query: &str, constraints: &SearchConstraints)` signature (`provider.rs:79-83`). `publication_time_capability` defaults to `Unsupported` (`provider.rs:67-69`). *Phase 03 S2:* `query_shapes` defaults to none, so a provider that declares no shape is never routed. | Unique lowercase `name()` (`provider.rs:35-37`); honoring `max_results`, domain lists, language, and freshness; cancellation safety when the future is dropped (`provider.rs:44-50`). `search` receives no consumer identity, ledger handle, attempt identity, or credential reference, so it cannot authorize or charge anything. | Trait implemented; no provider adapter exists. *Phase 03 S2:* request builders and parsers exist for the Tier-0 cohort; their adapters land with the transport wiring |
 | `DeepResearch` (`deep.rs:52-94`) | Object safety; `submit`/`poll`/`fetch`/`cancel` signatures. | Every per-state rule in `deep.rs:25-51`: prompt `submit`, idempotent `poll`, `TaskNotReady` versus `TaskUnavailable` on `fetch`, idempotent `cancel`. `submit(query, depth)` (`deep.rs:63`) carries no budget, constraints, consumer identity, or idempotency key. | Trait implemented; `LocalDeepResearch` is the only implementation |
 | `Crawler` (`crawler.rs:79-103`) | The request URL must be a `ValidatedTarget` (`crawler.rs:98-102`); a bare `Url` does not compile (compile-fail doctest, `crawler.rs:65-71`). | Checking every redirect target, propagating the check error, and connecting only to `ValidatedTarget::addrs` (`crawler.rs:25-45`, restated as prose-only at `crawler.rs:73-78`). The separate `constraints` argument need not match the constraints the target was validated under. The module doc names external extractors (Firecrawl, trafilatura) as implementation owners (`crawler.rs:5-8`), which the accepted boundary supersedes. | Convention only past the first hop; retired in Phase 01 S1 |
 | `Resolver` (`net_policy.rs:225-236`) | Synchronous `resolve(host, port) -> io::Result<Vec<IpAddr>>`. Every returned address is still classified by the target policy, so a resolver can narrow but not widen what passes. | Offloading blocking implementations from an async executor. | Implemented |
@@ -84,10 +90,10 @@ behavior.
 | `SourceKind` (`citation.rs:24-87`) | Closed `#[non_exhaustive]` set; `is_authoritative` is true for journal, legal, filing, and patent (`citation.rs:81-86`). | The doc comment at `citation.rs:78-79` omits patent. | Implemented |
 | `Citation` (`citation.rs:98-182`) | `new` and the deserializer clamp `confidence` into `0.0..=1.0` and map NaN to 0 (`citation.rs:129`, `:146-166`). `published_at` defaults to `Unknown` at construction and on decode (`citation.rs:120-121`). | `pub` fields can be mutated after construction. `source_url` is any absolute URL; it is not a validated target. | Implemented |
 | `ResultHit` (`result.rs:27-165`) | `new` and the deserializer require at least one citation (`result.rs:91-104`, `:172-184`) and clamp `score` (`result.rs:56`, `:105-109`). `with_full_text` caps `full_text` at 4 MiB (`result.rs:128-140`). | `full_text` has no cap on deserialize (`result.rs:44`). `pub` fields allow clearing `citations` after construction. Hit ordering is by convention (`result.rs:217-218`). | Implemented at construction and decode only |
-| `ResearchResult` (`result.rs:206-304`) | Serializable envelope; `top_hit` ranks NaN last (`result.rs:281-283`). | `cache_key` is a caller-supplied opaque string (`result.rs:229-233`); no cache layer derives it. `provenance` may be empty. No schema version. | Implemented as a value |
-| `ProvenanceEntry` (`result.rs:306-326`) | Provider id plus citation. | A failed attempt is recorded with a "synthetic miss citation" by convention (`result.rs:312-314`); no attempt identity or outcome field exists. | Implemented as a value |
-| `QueryShape` (`query.rs:26-105`) | Closed set; `as_str` matches serde; `tolerates_stale_cache` (`query.rs:102-104`). | No classifier or router exists; routing comments in the variant docs are plans. | Implemented as a value |
-| `ProviderTier` (`tier.rs:14-73`) | Ordering, `is_paid` for Tier 1 and Tier 3 (`tier.rs:54-56`), `fallback_priority`. | No router exists. The doc at `tier.rs:24-26` says Tier 1 is attempted after a Tier 0 miss, which contradicts current policy: paid tiers are disabled until explicitly configured and reserved, and a Tier-0 miss never enables them. | Implemented as a value |
+| `ResearchResult` (`result.rs:206-304`) | Serializable envelope; `top_hit` ranks NaN last (`result.rs:281-283`). | *Phase 03 S2:* `Router` derives `cache_key` from the whitespace-normalized query, the shape, and the constraints with canonicalized domain lists, and records one attempt receipt per routed provider; `evidence_state` distinguishes answered, no evidence, and unanswered. A result built outside the router carries a caller-supplied key and may have empty provenance. No cache layer exists. No schema version. | Implemented as a value |
+| `ProvenanceEntry` (`result.rs:306-326`) | *Phase 03 S2:* provider id plus an optional citation and an optional attempt receipt (route ordinal, tier, outcome: answered with drop counts, empty, failed with its error class, or refused); decoding rejects an entry with neither. | *Phase 03 S2:* no durable attempt identity or endpoint policy revision is recorded. | Implemented as a value |
+| `QueryShape` (`query.rs:26-105`) | Closed set; `as_str` matches serde; `tolerates_stale_cache` (`query.rs:102-104`). | *Phase 03 S2:* `Router` routes each shape to the registered providers that declare it; a shape no provider declares is an explicit `Unsupported` error. No classifier exists. | Implemented as a value |
+| `ProviderTier` (`tier.rs:14-73`) | Ordering, `is_paid` for Tier 1 and Tier 3 (`tier.rs:54-56`), `fallback_priority`. | *Phase 03 S2:* `Router` refuses every paid tier with a typed receipt, whatever the budget allows, until the durable ledger exists. The doc at `tier.rs:24-26` says Tier 1 is attempted after a Tier 0 miss, which contradicts current policy: paid tiers are disabled until explicitly configured and reserved, and a Tier-0 miss never enables them. | Implemented as a value |
 
 ### 3.5 Freshness
 
@@ -120,7 +126,7 @@ behavior.
 | Item | Enforced | Caller convention today | Status |
 |------|----------|-------------------------|--------|
 | `Error` (`error.rs:25-287`) | Flat `#[non_exhaustive]` snafu enum with an implicit location on every variant; `Send + Sync + 'static` asserted at compile time (`error.rs:292-295`). | Context selectors are public (`error.rs:26`), so any crate can build any variant. `Error` is not serializable. | Implemented |
-| `ErrorClass`, `Error::class` (`error.rs:297-366`) | Every variant maps to exactly one of transient, permanent, fatal. `BudgetExceeded` is transient only when it carries a reset time. | None. | Implemented |
+| `ErrorClass`, `Error::class` (`error.rs:297-366`) | Every variant maps to exactly one of transient, permanent, fatal. `BudgetExceeded` is transient only when it carries a reset time. *Phase 03 S2:* `ErrorClass` is serializable (snake case) for attempt receipts. | None. | Implemented |
 | `Result` (`error.rs:19`) and the 17 `*Snafu` selectors re-exported at `lib.rs:61-67` | Construction paths for the variants above. | None. | Implemented |
 
 ### 3.9 Existing tests are starting fixtures
@@ -236,8 +242,8 @@ separately so that no two share an idempotency rule by accident.
 
 | Identity | Composition | Minted | Idempotency rule | Baseline |
 |----------|-------------|--------|------------------|----------|
-| Query | Consumer scope id, normalized query, `QueryShape`, constraint digest, tenant, privacy, and egress scope identifiers | Computed deterministically from the request | Same inputs give the same identity; the cache key derives from it | `ResearchResult::cache_key` is a caller-supplied string (`result.rs:229-233`) |
-| Provider attempt | Query identity, provider id, endpoint policy revision, attempt ordinal | Durably, before the upstream call | A retry after an unknown outcome reuses the attempt identity | None; provenance and cost carry only a provider id |
+| Query | Consumer scope id, normalized query, `QueryShape`, constraint digest, tenant, privacy, and egress scope identifiers | Computed deterministically from the request | Same inputs give the same identity; the cache key derives from it | `ResearchResult::cache_key` is a caller-supplied string (`result.rs:229-233`). *Phase 03 S2:* the router derives it from the normalized query, shape, and canonicalized constraints, without consumer or scope identifiers |
+| Provider attempt | Query identity, provider id, endpoint policy revision, attempt ordinal | Durably, before the upstream call | A retry after an unknown outcome reuses the attempt identity | None; provenance and cost carry only a provider id. *Phase 03 S2:* router receipts carry provider id, route ordinal, tier, and outcome; no durable identity or endpoint policy revision |
 | Reservation | Minted by the ledger, keyed by attempt identity | At reserve | Reserve is idempotent per attempt identity: a second reserve returns the first. Settle and release are idempotent and terminal. Unknown upstream billing is recorded as unknown, never as zero. | `try_reserve` records an anonymous amount (`budget.rs:363-368`) |
 | Task | Minted by the research service at submit, bound to a consumer-supplied idempotency key | At submit | A resubmission with the same key after a lost response returns the same task | Provider-owned `TaskId`; per-instance counter in `LocalDeepResearch` |
 | Consumer emission | Task or query identity, consumer id, sink id, content digest | At emission | Sink delivery is idempotent on this identity; a fact emission stays a candidate until the consumer confirms it | None |

@@ -8,4 +8,12 @@
     <id>http://arxiv.org/abs/2106.00007v1</id>
     <summary>An entry without a title.</summary>
   </entry>
+  <entry>
+    <id>urn:example:not-an-abstract-page</id>
+    <title>An Identifier That Is Not an Abstract Page</title>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2106.00009v1</id>
+    <title>Another Complete Entry</title>
+  </entry>
 </feed>

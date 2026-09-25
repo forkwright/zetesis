@@ -257,6 +257,14 @@ pub struct ResearchResult {
     /// shape, and constraints produce identical `cache_key`. Format is
     /// provider-layer opaque.
     pub cache_key: String, // kanon:ignore RUST/plain-string-secret -- derived cache lookup key, not a credential
+
+    /// Provider records dropped because they could not become a cited hit
+    /// (a missing required field, an unusable identity or URL). A
+    /// provider's own result counts its drops; a routed result sums them,
+    /// with each attempt's count in its receipt. Absent in serialized form
+    /// when zero, and decoded as zero when absent.
+    #[serde(default, skip_serializing_if = "crate::serde_util::is_zero")]
+    pub malformed_records: usize,
 }
 
 impl ResearchResult {
@@ -278,6 +286,7 @@ impl ResearchResult {
             provenance,
             cost_spent,
             cache_key: cache_key.into(),
+            malformed_records: 0,
         }
     }
 
@@ -295,6 +304,7 @@ impl ResearchResult {
             provenance: Vec::new(),
             cost_spent: CostTracking::default(),
             cache_key: cache_key.into(),
+            malformed_records: 0,
         }
     }
 
@@ -315,6 +325,36 @@ impl ResearchResult {
         self.hits.iter().any(ResultHit::has_strong_citation)
     }
 
+    /// Whether this result holds evidence, and if not, whether any
+    /// provider answered.
+    ///
+    /// An empty hit list alone cannot tell "the providers found nothing"
+    /// from "no provider could be asked"; this reads the attempt receipts
+    /// in [`ResearchResult::provenance`] to tell them apart. A result with
+    /// no hits and no receipt of an answer reads as
+    /// [`EvidenceState::Unanswered`], never as absence of evidence.
+    #[must_use]
+    pub fn evidence_state(&self) -> EvidenceState {
+        if !self.hits.is_empty() {
+            return EvidenceState::Answered;
+        }
+        let answered = self
+            .provenance
+            .iter()
+            .filter_map(|entry| entry.attempt.as_ref())
+            .any(|attempt| {
+                matches!(
+                    attempt.outcome,
+                    AttemptOutcome::Answered { .. } | AttemptOutcome::Empty
+                )
+            });
+        if answered {
+            EvidenceState::NoEvidence
+        } else {
+            EvidenceState::Unanswered
+        }
+    }
+
     /// Number of distinct providers that appeared in the provenance chain.
     #[must_use]
     pub fn provider_count(&self) -> usize {
@@ -327,6 +367,23 @@ impl ResearchResult {
         ids.dedup();
         ids.len()
     }
+}
+
+/// Whether a [`ResearchResult`] holds evidence; see
+/// [`ResearchResult::evidence_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvidenceState {
+    /// At least one hit survived screening.
+    Answered,
+    /// At least one provider answered, and nothing it returned survived:
+    /// it had no hits, or every hit was dropped by the caller's screens or
+    /// as a malformed record.
+    NoEvidence,
+    /// No provider is recorded as having answered: every attempt failed or
+    /// was refused, or the result carries no attempt receipt. This is not
+    /// evidence of absence.
+    Unanswered,
 }
 
 /// Single entry in the `provenance` chain.
@@ -424,9 +481,10 @@ pub struct ProviderAttempt {
 #[non_exhaustive]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AttemptOutcome {
-    /// The provider returned at least one hit. The rejection counts say
-    /// how many of the `returned` hits the router dropped, and why; the
-    /// rest were kept for merging.
+    /// The provider returned at least one hit or dropped at least one
+    /// malformed record. The rejection counts say how many of the
+    /// `returned` hits the router dropped, and why; the rest were kept for
+    /// merging.
     Answered {
         /// Hits the provider returned.
         returned: usize,
@@ -438,6 +496,10 @@ pub enum AttemptOutcome {
         rejected_by_domain: usize,
         /// Hits dropped because they carried no citation at all.
         rejected_uncited: usize,
+        /// Records the provider's parser dropped before they became hits
+        /// (a missing required field, an unusable identity or URL); not
+        /// counted in `returned`.
+        malformed_records: usize,
     },
     /// The provider answered and had no hits for the query.
     Empty,
@@ -816,6 +878,33 @@ mod tests {
             let back: ProvenanceEntry = ciborium::from_reader(buf.as_slice()).unwrap();
             assert_eq!(back, entry, "CBOR round trip");
         }
+    }
+
+    #[test]
+    fn evidence_state_without_receipts_is_unanswered() {
+        // WHY: a result that records no answering attempt must not claim
+        // that the providers found nothing.
+        let r = ResearchResult::empty("x", QueryShape::QuickFactual, "k");
+        assert_eq!(r.evidence_state(), EvidenceState::Unanswered, "no receipts");
+        assert_eq!(
+            sample_result().evidence_state(),
+            EvidenceState::Answered,
+            "hits are evidence with or without receipts"
+        );
+    }
+
+    #[test]
+    fn malformed_records_are_omitted_from_the_wire_when_zero() {
+        let mut r = ResearchResult::empty("x", QueryShape::QuickFactual, "k");
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(
+            json.get("malformed_records").is_none(),
+            "a zero count keeps the existing wire shape"
+        );
+        r.malformed_records = 2;
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ResearchResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.malformed_records, 2, "a non-zero count round-trips");
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub use wikipedia::Wikipedia;
 pub(crate) const META_DOI: &str = "doi";
 /// Metadata key: arXiv identifier without its version suffix.
 pub(crate) const META_ARXIV_ID: &str = "arxiv_id";
+/// Metadata key: the DOI arXiv registers for its own record
+/// (`10.48550/arxiv.<id>`), lowercased. It names the same work as
+/// `arxiv_id`, so it is never a `doi` identity.
+pub(crate) const META_ARXIV_DOI: &str = "arxiv_doi";
 /// Metadata key: arXiv version number of the retrieved record.
 pub(crate) const META_ARXIV_VERSION: &str = "arxiv_version";
 /// Metadata key: Semantic Scholar `paperId`.
@@ -63,6 +67,9 @@ pub(crate) const META_VENUE: &str = "venue";
 pub(crate) const META_LICENSE: &str = "license";
 /// Metadata key: [`EndpointPolicy::revision`] the request was built under.
 pub(crate) const META_POLICY_REVISION: &str = "provider_policy_revision";
+
+/// DOI prefix arXiv registers for its own preprints, lowercased.
+const ARXIV_DOI_PREFIX: &str = "10.48550/arxiv.";
 
 /// Media type the JSON endpoints answer with.
 const MEDIA_JSON: &str = "application/json";
@@ -118,6 +125,9 @@ pub struct EndpointPolicy {
     pub license: &'static str,
     /// Query shapes this endpoint serves.
     pub query_shapes: &'static [QueryShape],
+    /// Language scope of the endpoint as used here, and whether the
+    /// request builder applies [`SearchConstraints::language`].
+    pub language_scope: &'static str,
 }
 
 /// A documented per-client request ceiling: at most `requests` requests in
@@ -140,6 +150,22 @@ pub struct ProviderRequest {
     pub url: Url,
     /// Request headers as `(lowercase name, value)` pairs.
     pub headers: Vec<(&'static str, String)>,
+}
+
+/// A provider response a parser accepted.
+///
+/// A record that lacks a required field, or whose identity or URL cannot
+/// be used, is dropped and counted in `malformed_records`; the remaining
+/// hits keep the rank the provider gave them. A defect in the response as
+/// a whole (a body that does not parse, or a known field whose type
+/// changed) fails the parse instead.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ParsedResponse {
+    /// Usable hits, in provider rank order.
+    pub hits: Vec<ResultHit>,
+    /// Records dropped because they could not become a cited hit.
+    pub malformed_records: usize,
 }
 
 /// Values a parser gathered for one hit, before it becomes a [`ResultHit`].
@@ -291,17 +317,32 @@ pub(crate) fn bounded_detail(detail: impl Display) -> String {
     }
 }
 
-/// A required per-result string that is present and not blank.
-pub(crate) fn required(
-    provider: &str,
-    value: Option<String>,
-    position: usize,
-    field: &str,
-) -> Result<String> {
+/// A required per-record string, whitespace collapsed; `None` when absent
+/// or blank, which drops the record.
+pub(crate) fn required(value: Option<String>) -> Option<String> {
     value
         .map(|v| collapse_whitespace(&v))
         .filter(|v| !v.is_empty())
-        .ok_or_else(|| malformed(provider, format!("result {position} has no `{field}`")))
+}
+
+/// Map each record at its zero-based provider rank; a record the mapper
+/// returns `None` for is dropped and counted.
+pub(crate) fn collect_records<R>(
+    records: Vec<R>,
+    mut map: impl FnMut(R, usize) -> Result<Option<ResultHit>>,
+) -> Result<ParsedResponse> {
+    let mut hits = Vec::with_capacity(records.len());
+    let mut malformed_records = 0;
+    for (rank, record) in records.into_iter().enumerate() {
+        match map(record, rank)? {
+            Some(hit) => hits.push(hit),
+            None => malformed_records += 1,
+        }
+    }
+    Ok(ParsedResponse {
+        hits,
+        malformed_records,
+    })
 }
 
 /// Case-insensitive header lookup.
@@ -356,6 +397,34 @@ pub(crate) fn normalize_doi(raw: &str) -> Option<String> {
         && !suffix.is_empty()
         && !bare.chars().any(char::is_whitespace);
     well_formed.then(|| bare.to_owned())
+}
+
+/// What a DOI identifies, once normalized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DoiIdentity {
+    /// A DOI registered by a publisher or repository other than arXiv.
+    Publisher(String),
+    /// The DOI arXiv registers for its own record, and the arXiv
+    /// identifier it names (version removed).
+    Arxiv {
+        /// The normalized DOI.
+        doi: String,
+        /// The arXiv identifier without its version.
+        id: String,
+    },
+}
+
+/// Normalize a DOI and tell an arXiv-registered DOI (`10.48550/arXiv.<id>`)
+/// from any other. `None` when the value is not a DOI.
+pub(crate) fn classify_doi(raw: &str) -> Option<DoiIdentity> {
+    let doi = normalize_doi(raw)?;
+    match doi
+        .strip_prefix(ARXIV_DOI_PREFIX)
+        .and_then(normalize_arxiv_id)
+    {
+        Some((id, _version)) => Some(DoiIdentity::Arxiv { doi, id }),
+        None => Some(DoiIdentity::Publisher(doi)),
+    }
 }
 
 /// Canonical arXiv identifier and version: `arXiv:` prefix removed,
@@ -449,6 +518,31 @@ mod tests {
         for raw in ["", "not a doi", "11.1000/x", "10.1000/", "10.1000"] {
             assert_eq!(normalize_doi(raw), None, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn arxiv_datacite_doi_is_an_arxiv_identity() {
+        assert_eq!(
+            classify_doi("https://doi.org/10.48550/arXiv.2101.00001v2"),
+            Some(DoiIdentity::Arxiv {
+                doi: "10.48550/arxiv.2101.00001v2".to_owned(),
+                id: "2101.00001".to_owned(),
+            }),
+            "arXiv's DOI names the arXiv identifier, version removed"
+        );
+        assert_eq!(
+            classify_doi("10.5555/Synthetic.2021.042"),
+            Some(DoiIdentity::Publisher(
+                "10.5555/synthetic.2021.042".to_owned()
+            )),
+            "any other DOI is a publisher identity"
+        );
+        assert_eq!(
+            classify_doi("10.48550/other.1"),
+            Some(DoiIdentity::Publisher("10.48550/other.1".to_owned())),
+            "only the arXiv namespace under the prefix is an arXiv identity"
+        );
+        assert_eq!(classify_doi("not a doi"), None, "not a DOI");
     }
 
     #[test]

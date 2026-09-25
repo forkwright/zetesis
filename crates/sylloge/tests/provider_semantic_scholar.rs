@@ -22,8 +22,8 @@ const TYPE_CHANGED: &[u8] =
     include_bytes!("fixtures/providers/semantic_scholar/search_type_changed.json");
 const MALFORMED: &[u8] =
     include_bytes!("fixtures/providers/semantic_scholar/search_malformed.json");
-const MISSING_TITLE: &[u8] =
-    include_bytes!("fixtures/providers/semantic_scholar/search_missing_title.json");
+const MALFORMED_RECORDS: &[u8] =
+    include_bytes!("fixtures/providers/semantic_scholar/search_malformed_records.json");
 const BAD_REQUEST: &[u8] =
     include_bytes!("fixtures/providers/semantic_scholar/bad_request_documented.json");
 const RATE_LIMITED: &[u8] =
@@ -36,7 +36,9 @@ fn accessed() -> Timestamp {
 }
 
 fn parse_ok(body: &[u8]) -> Vec<ResultHit> {
-    SemanticScholar::parse(200, &[], body, accessed()).unwrap()
+    let parsed = SemanticScholar::parse(200, &[], body, accessed()).unwrap();
+    assert_eq!(parsed.malformed_records, 0, "no record is dropped");
+    parsed.hits
 }
 
 fn query_pairs(url: &url::Url) -> Vec<(String, String)> {
@@ -203,9 +205,13 @@ fn documented_shape_keeps_an_undated_preprint_undated() {
         "arXiv identity kept"
     );
     assert_eq!(
-        preprint.metadata.get("doi"),
+        preprint.metadata.get("arxiv_doi"),
         Some(&json!("10.48550/arxiv.2101.00001")),
-        "DOI lowercased"
+        "arXiv's DataCite DOI is kept, lowercased, as the arXiv DOI"
+    );
+    assert!(
+        !preprint.metadata.contains_key("doi"),
+        "arXiv's DataCite DOI is not a publisher DOI identity"
     );
     assert_eq!(preprint.snippet, "", "a null abstract is an empty snippet");
     assert!(
@@ -319,11 +325,23 @@ fn malformed_body_is_a_provider_failure_naming_the_position() {
 }
 
 #[test]
-fn paper_without_a_title_fails_the_response_by_position() {
-    let err = SemanticScholar::parse(200, &[], MISSING_TITLE, accessed()).unwrap_err();
-    assert!(
-        err.to_string().contains("result 2 has no `title`"),
-        "the message names the record and field: {err}"
+fn records_without_a_title_or_with_an_unusable_url_are_dropped_and_counted() {
+    let parsed = SemanticScholar::parse(200, &[], MALFORMED_RECORDS, accessed()).unwrap();
+    assert_eq!(
+        parsed.malformed_records, 2,
+        "the untitled paper and the paper with a bad url are dropped"
+    );
+    let titles: Vec<&str> = parsed.hits.iter().map(|h| h.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["A Complete Record", "Another Complete Record"],
+        "the complete papers survive"
+    );
+    let scores: Vec<f32> = parsed.hits.iter().map(|h| h.score).collect();
+    assert_eq!(
+        scores,
+        [1.0, 0.25],
+        "survivors keep the rank the provider gave them"
     );
 }
 
