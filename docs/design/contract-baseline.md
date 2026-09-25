@@ -137,18 +137,18 @@ behavior.
 
 ### 3.10 Source documentation drift
 
-These Rust doc comments disagree with the accepted boundaries. They are
-listed here because this change edits only Markdown and TOML; each is removed
-or corrected by the source change named in the last column.
+These Rust doc comments disagreed with the accepted boundaries at the
+baseline revision. The last column names the change that corrects each.
 
 | Location | Drift | Corrected by |
 |----------|-------|--------------|
 | `crawler.rs:1-8`, `lib.rs:14-15`, `constraints.rs:1-13` | `crawler.rs` names external extractors (Firecrawl, trafilatura) as the implementations; the other two describe the `Crawler` surface. The accepted boundary makes Zetesis the owner of anonymous bounded static transfer and extraction. | Phase 01 S1 (`Crawler` and `PageContent` retired) |
-| `tier.rs:3-6`, `tier.rs:24-26` | Describe a router that walks tiers until budget runs out and tries Tier 1 after a Tier 0 miss. | A Phase 00 S1 or Phase 01 source change |
-| `provider.rs:4-6` | Stale note about how Tier 0 providers were to be dispatched. | A Phase 00 S1 or Phase 01 source change |
-| `deep.rs:3-5` | Lists hosted and paid deep-research products as expected backends without the authorization boundary. | Phase 05 |
-| `budget.rs:195-198`, `budget.rs:239-244`, `budget.rs:451` | Point callers to `phase_zero_default`. | Phase 00 S1 |
-| `constraints.rs:280`, `citation.rs:78-79` | Clamp and authoritative-set wording narrower or wider than the code. | Any later source change touching those files |
+| `tier.rs:3-6`, `tier.rs:24-26` | Describe a router that walks tiers until budget runs out and tries Tier 1 after a Tier 0 miss. | This change |
+| `provider.rs:4-6` | Stale note about how Tier 0 providers were to be dispatched. | This change |
+| `deep.rs:3-5` | Lists hosted and paid deep-research products as expected backends without the authorization boundary. | This change |
+| `query.rs` variant docs | Claim routes to paid providers (Brave, Tavily, Exa) that no router implements. | This change |
+| `budget.rs:195-198`, `budget.rs:239-244`, `budget.rs:451` | Point callers to `phase_zero_default`. | This change |
+| `constraints.rs:280`, `citation.rs:78-79` | Clamp and authoritative-set wording narrower or wider than the code. | This change |
 
 ## 4. API delta
 
@@ -158,7 +158,7 @@ or corrected by the source change named in the last column.
 |--------|--------|
 | Remove `BudgetConstraint::phase_zero_default` and every doc reference to it. Tests that used it construct their budgets explicitly. | It enabled paid routing with caps ($0.05 per query, $5 per day, $20 lifetime) that cite the wrong requirement and the wrong $20 scope (zetesis#47 reopen comment). Paid use must be explicitly configured, not reached through a named default. |
 | Canonicalize domain allow and deny entries at the constraint boundary and reject unusable entries with a new permanent `Error::InvalidConstraint`. | Today an entry that normalizes to empty, or that can never match the host form the URL parser produces (for example a non-ASCII entry against a punycode host), is silently ignored. In a denylist that fails open. |
-| Reject malformed persisted records on deserialize: `ResearchStatus::Running` with progress above 100, `CostTracking` whose map key differs from its entry's `provider_id`, `SpendLedger` whose lifetime total is below the sum of its events. | Deserialization is a second construction path that currently bypasses the invariants the constructors hold. |
+| Reject malformed persisted records on deserialize: `ResearchStatus::Running` with progress above 100, `CostTracking` whose map key differs from its entry's `provider_id`, `SpendLedger` whose lifetime total is below the sum of its events or that holds a zero-spend event, and `ResultHit::full_text` longer than `MAX_FULL_TEXT_BYTES`. | Deserialization is a second construction path that currently bypasses the invariants the constructors hold. |
 | Add golden serialized fixtures for the public types a consumer may persist, and tests for malformed, overflow, and invalid-constraint input in `sylloge`. Unknown-version tests belong to the first versioned type, the evidence envelope (Phase 01 S2). | A changed encoding must fail a test instead of silently changing stored data. |
 
 ### 4.2 Phase 01 (zetesis#48)
