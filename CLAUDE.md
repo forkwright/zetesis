@@ -1,18 +1,23 @@
 <!--
-scope: zetesis repo conventions (research substrate: Tier-0 free APIs, self-hosted deep research, budget ledger)
-defers_to: host-operations docs for machine topology and GPU mode selection; operator global CLAUDE.md for operator principles; kanon standards for universal engineering policy
-tightens: free-first routing discipline, budget as first-class constraint, caching-by-default via koina+fjall
+scope: zetesis repo conventions (research substrate: Tier-0 free APIs, bounded static acquisition, self-hosted deep inquiry, budget ledger)
+defers_to: Tropos for host modes; Logismos for model execution; operator global CLAUDE.md for operator principles; kanon standards for universal engineering policy
+tightens: free-first routing discipline, paid use disabled until configured and reserved, budget as first-class constraint, credentials and egress policy as references only
 -->
 
 # zetesis
 
-Sovereign research substrate. Free-first routing across academic + reference APIs; self-hosted orchestration for deep research on local LLMs; budget-capped paid APIs as fallback.
+Sovereign research substrate. Free-first routing across academic + reference APIs; bounded static acquisition; self-hosted deep inquiry through a consumer-granted model contract; paid APIs only when explicitly configured and reserved.
 
 ## Status
 
-Phase 1 scaffold. The four-crate workspace is present: `zetesis`,
-`sylloge`, `elenkhos`, and `synopsis`. `sylloge` owns the initial
-provider/result/budget API surface; `zetesis` re-exports it as the facade.
+Pre-release (`0.0.x`). The four-crate workspace is present: `zetesis`,
+`sylloge`, `elenkhos`, and `synopsis`. `sylloge` owns the provider,
+constraint, network-target, citation, result, cost, budget, and
+deep-research lifecycle types; `zetesis` re-exports them as the facade.
+`elenkhos` and `synopsis` are marker types. No provider adapter, HTTP
+client, cache, durable ledger, model binding, or daemon exists yet.
+`docs/design/contract-baseline.md` records what each public type enforces
+and what is caller convention.
 
 ## Repository conventions
 
@@ -22,6 +27,7 @@ provider/result/budget API surface; `zetesis` re-exports it as the facade.
   - Documentation: [CC BY-NC-ND 4.0](LICENSE-DOCS).
   Commercial client-contract work does NOT go here.
 - Workspace member crates under `crates/<crate-name>/`; flat layout (no nested `crates/zetesis/<subcrate>/` pattern unless the workspace grows past ~10 crates).
+- Zetesis depends on no consumer. Consumers pin a merged zetesis commit SHA. Logismos, Tropos, and Kanon are reached through service or registration contracts, never Cargo dependencies.
 
 ## Why this repo instead of a kanon crate
 
@@ -29,17 +35,20 @@ Zetesis has three planned fleet consumers (aletheia, dioptron, akroasis) plus li
 
 ## Key design principles
 
-- **Free-first.** Tier 0 (free/quality APIs: Semantic Scholar, arXiv, OpenAlex, Crossref, PubMed, Wikipedia) is the default. Tier 1 paid APIs (Brave, Exa, Tavily) are fallbacks, not first choice.
-- **Self-hosted orchestration default.** The planned deep-research surface vendors the local-first loop pattern into Rust against logismos-compatible local LLMs. Paid deep-research APIs (You.com, Valyu) stay reserved for budget-authorized critical queries.
-- **Budget is a first-class constraint.** Per-query, per-day, per-agent ceilings. Exceed rejects.
-- **Cached by default.** koina+fjall with per-provider freshness windows.
+- **Free-first.** Tier 0 (free/quality APIs: Semantic Scholar, arXiv, OpenAlex, Crossref, PubMed, Wikipedia) is the default route. Paid providers (Tier 1: Brave, Exa, Tavily; Tier 3: paid deep research) are disabled until explicitly configured and a reservation authorizes the spend. A Tier-0 miss never enables paid use; there is no automatic paid fallback.
+- **Self-hosted deep inquiry.** The planned deep-inquiry loop (Phase 05) vendors the local-first loop pattern into Rust and calls models only through a consumer-granted model contract. Logismos owns model execution. A missing or refused grant fails the task; there is no implicit fallback.
+- **Bounded static acquisition.** Zetesis owns anonymous static GET end to end (zetesis#48): per-hop validation, bounded transfer and decoding, static extraction, versioned evidence envelope. Dioptron owns sessions, rendering, and scripted browsing.
+- **Budget is a first-class constraint.** Per-query, per-consumer-day, and fleet-day ceilings; exceed rejects. Today `BudgetConstraint::try_reserve` is in-memory arithmetic; the durable, identity-bound ledger is zetesis#47.
+- **Cache planned.** Per-provider freshness windows. The storage primitive is not selected; apply the kanon storage decision tree (see the contract baseline). koina + fjall is a candidate, not a dependency.
 - **Cited + structured.** No synthesis without source provenance.
 
 ## Common gotchas
 
-- Free-tier APIs have aggressive rate limits; `sylloge` tracks free-tier quotas separately from paid spend.
-- Deep research can blow $10+ in token costs per query if orchestrated against Anthropic/OpenAI. Default backend is local logismos.
-- GPU research mode (Phase 6) is mutually exclusive with GPU inference mode on a single-GPU host; the operator picks which one holds the device.
+- Free-tier APIs have aggressive rate limits. `sylloge` records free-tier units separately from paid spend (`ProviderSpend::free_tier_units`); quota enforcement is not implemented yet.
+- `SearchConstraints::check_url` resolves DNS with the blocking `SystemResolver`; async callers offload it with `spawn_blocking`.
+- `LocalDeepResearch` is in-memory. Task ids restart per instance and nothing survives process exit.
+- Zetesis never switches host modes or selects a GPU. Tropos owns host modes; Logismos owns model execution.
+- Credentials and egress policy are references. Never put a credential value or policy content into a serializable type, cache key, envelope, log line, or error message.
 - Downstream use must comply with the scoped license map above; commercial client-contract work must not depend on zetesis.
 
 ## Related
@@ -47,12 +56,14 @@ Zetesis has three planned fleet consumers (aletheia, dioptron, akroasis) plus li
 | Project | Relationship |
 |---------|-------------|
 | aletheia (nous agents) | Planned research consumer adapter |
-| dioptron | Planned static-acquisition consumer adapter |
+| dioptron | Planned static-acquisition consumer adapter; owns sessions, rendering, scripted browsing |
 | akroasis | Planned broader OSINT public-source research consumer |
-| logismos | Self-hosted orchestration backend |
-| koina + fjall | Cache + budget ledger persistence |
+| logismos | Model execution owner; deep inquiry reaches it only through a consumer-granted model contract |
+| tropos | Owns host modes (GPU research versus inference); zetesis never switches them |
+| kanon | Gate, SHA registration for consumer pins, federated tool surfaces, storage decision tree |
+| pinax | Candidate transactional store for the ledger (not a dependency) |
+| koina + fjall | Candidate blob and cache store (not a dependency) |
 | heurēma | Future semantic rerank of Tier 0 results |
-| host-operations environment | Owns GPU research/inference mode selection |
 | hermeneus (inside aletheia) | Sibling primitive: hermeneus unifies LLM providers, zetesis unifies research providers |
 
 <!-- kanon:auto-start -->

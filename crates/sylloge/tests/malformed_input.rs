@@ -244,3 +244,31 @@ fn search_constraints_unknown_field_is_rejected() {
         "an unknown constraint must not be silently dropped"
     );
 }
+
+#[test]
+fn result_hit_full_text_over_the_cap_is_rejected_at_decode() {
+    // WHY: `with_full_text` caps the body at `MAX_FULL_TEXT_BYTES`, but the
+    // field is `pub` and deserializable, so a decoded provider payload
+    // could carry an unbounded body past the documented cap.
+    let hit = sylloge::ResultHit::new(
+        "t",
+        "s",
+        url("https://example.org/"),
+        vec![sylloge::Citation::new(
+            url("https://example.org/"),
+            "2026-07-01T00:00:00Z".parse().unwrap(),
+            sylloge::SourceKind::Web,
+            1.0,
+            None,
+        )],
+        0.5,
+    )
+    .unwrap();
+    let mut value = serde_json::to_value(&hit).unwrap();
+    value["full_text"] =
+        serde_json::Value::String("x".repeat(sylloge::ResultHit::MAX_FULL_TEXT_BYTES + 1));
+    assert!(
+        serde_json::from_value::<sylloge::ResultHit>(value).is_err(),
+        "a decoded full_text over the cap must be rejected"
+    );
+}
