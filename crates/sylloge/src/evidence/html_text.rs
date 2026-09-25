@@ -51,6 +51,18 @@ pub struct Segment {
     pub text: String,
 }
 
+impl Segment {
+    /// This segment with its span moved `offset` bytes later.
+    #[must_use]
+    pub(crate) fn shifted(&self, offset: usize) -> Self {
+        Self {
+            start: self.start + offset,
+            end: self.end + offset,
+            text: self.text.clone(),
+        }
+    }
+}
+
 /// The result of one extraction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
