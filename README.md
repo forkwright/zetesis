@@ -4,7 +4,7 @@
 
 Sovereign research substrate: one Rust interface over research and search providers, with budget enforcement, quota accounting, cited result normalization, and bounded static acquisition. Most of that surface is still planned. The tables below separate what has landed from what has not.
 
-**Status:** pre-release (`0.0.x`). The four-crate workspace has landed. `sylloge` carries the provider, constraint, network-target, static-acquisition, citation, result, cost, budget, and deep-research lifecycle types, and `zetesis` re-exports them. The only HTTP client is `StaticAcquirer` (anonymous static GET). No provider adapter, cache, durable ledger, model binding, or daemon exists yet. The [contract baseline](docs/design/contract-baseline.md) records what each public type enforces today and what is caller convention.
+**Status:** pre-release (`0.0.x`). The four-crate workspace has landed. `sylloge` carries the provider, constraint, network-target, static-acquisition, citation, result, cost, budget, and deep-research lifecycle types, and `zetesis` re-exports them. The only HTTP client is `StaticAcquirer` (anonymous static GET), which returns a versioned, fingerprinted evidence envelope. No provider adapter, cache, durable ledger, model binding, or daemon exists yet. The [contract baseline](docs/design/contract-baseline.md) records what each public type enforces today and what is caller convention.
 **Open work:** `_llm/current_state.toml` lists the public open threads. Roadmap and blocker status are maintained outside this repository.
 
 ## Why
@@ -16,7 +16,7 @@ Zetesis takes a different shape:
 - **Free-first routing** across free academic and reference APIs (Semantic Scholar, arXiv, OpenAlex, Crossref, PubMed, Wikipedia). Tier 0 is the default route. Provider adapters are planned.
 - **Paid use is opt-in.** Paid providers are disabled until an operator configures them and a reservation authorizes the spend. A Tier-0 miss never enables paid use, and there is no automatic paid fallback. The durable, identity-bound reservation ledger is tracked by [zetesis#47](https://github.com/forkwright/zetesis/issues/47).
 - **Self-hosted deep inquiry** (planned). The local-first research loop calls models only through a model contract the consumer grants. Logismos executes the models. Paid model APIs are not a default route.
-- **Bounded static acquisition** (planned, [zetesis#48](https://github.com/forkwright/zetesis/issues/48)). Zetesis owns anonymous static GET: target and redirect validation, bounded transfer and decoding, static text extraction, and a versioned evidence envelope.
+- **Bounded static acquisition** ([zetesis#48](https://github.com/forkwright/zetesis/issues/48)). Zetesis owns anonymous static GET: target and redirect validation, bounded transfer and decoding, static text extraction, and a versioned evidence envelope with replay. Consumer pinning is Phase 01 S3.
 - **Cited + structured** output always. No synthesis without source provenance. Landed: a `ResultHit` cannot be constructed or decoded without at least one citation.
 - **Cache** with per-provider freshness windows (planned). The storage primitive is not selected yet.
 
@@ -25,7 +25,7 @@ Zetesis takes a different shape:
 | Crate | Landed | Planned |
 |-------|--------|---------|
 | `zetesis` | Facade re-exporting the `sylloge` surface; `steelman` and `briefing` aliases for the two reserved crates | CLI, daemon binary, consumer adapter wiring |
-| `sylloge` | `Provider` and `DeepResearch` traits; `SearchConstraints` with the fail-closed network-target check and non-forgeable `ValidatedTarget`; `StaticAcquirer` (anonymous static `GET` with per-hop validation, the `Connector` seam, and hop records); citation, result, freshness, cost, and budget types; in-memory `LocalDeepResearch` with an offline loop fixture | Tier-0 provider adapters, routing, durable reservation ledger, cache, the static-acquisition evidence envelope with decoding and extraction, deep-inquiry loop against a model contract |
+| `sylloge` | `Provider` and `DeepResearch` traits; `SearchConstraints` with the fail-closed network-target check and non-forgeable `ValidatedTarget`; `StaticAcquirer` (anonymous static `GET` with per-hop validation, the `Connector` seam, bounded `gzip`/`deflate` decoding, static text extraction, and evidence envelope v1 with fingerprint and `replay`); citation, result, freshness, cost, and budget types; in-memory `LocalDeepResearch` with an offline loop fixture | Tier-0 provider adapters, routing, durable reservation ledger, cache, deep-inquiry loop against a model contract |
 | `elenkhos` | Reserved crate boundary (marker type) | Retrospective steel-manning engine |
 | `synopsis` | Reserved crate boundary (marker type) | Briefing synthesizer |
 

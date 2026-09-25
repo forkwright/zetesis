@@ -24,9 +24,11 @@
 //!
 //! [`StaticAcquirer`] is the one concrete anonymous `GET` fetcher. It owns
 //! every hop of a transfer, validates each hop's target before any socket,
-//! connects only to the validated addresses, and returns the hop evidence
-//! with the bounded body in a [`Transfer`]. See the `acquisition` module
-//! documentation on [`StaticAcquirer`] for the policy.
+//! connects only to the validated addresses, decodes the bounded body,
+//! extracts its static text, and returns an [`Acquisition`]: the versioned
+//! [`EvidenceEnvelope`] to store verbatim and the decoded body bytes. See
+//! [`StaticAcquirer`] for the policy and [`EvidenceEnvelope`] for the
+//! schema, fingerprint, and [`replay`].
 //!
 //! # Error taxonomy
 //!
@@ -49,7 +51,9 @@ mod citation;
 mod constraints;
 mod cost;
 mod deep;
+mod digest;
 mod error;
+mod evidence;
 mod fixture;
 mod freshness;
 mod local_deep_research;
@@ -64,7 +68,7 @@ pub use acquisition::{
     AcquisitionFailure, AcquisitionLimits, ConnectAttempt, ConnectDeniedSnafu, ConnectError,
     ConnectIoSnafu, ConnectOutcome, ConnectTimedOutSnafu, ConnectedStream, Connector,
     DirectConnector, DowngradePolicy, HopRecord, ResponseRecord, SchemePolicy, StaticAcquirer,
-    StaticAcquirerBuilder, TlsRecord, Transfer, TransferOutcome, TrustAnchors,
+    StaticAcquirerBuilder, TlsRecord, TrustAnchors,
 };
 pub use budget::{BudgetConstraint, BudgetScope, DAY_WINDOW, SpendEvent, SpendLedger};
 pub use citation::{Citation, SourceKind};
@@ -78,6 +82,13 @@ pub use error::{
     TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu,
     UnsafeTargetSnafu, UnsupportedSnafu,
 };
+pub use evidence::decode::ContentCoding;
+pub use evidence::envelope::{
+    Acquisition, BodyRecord, EVIDENCE_SCHEMA_ID, EVIDENCE_SCHEMA_VERSION, EvidenceEnvelope,
+    ExtractionRecord, ExtractorId, Outcome, PartialReason, Producer, ReplayOutcome, replay,
+};
+pub use evidence::html_text::Segment;
+pub use evidence::media::{Charset, CharsetSource, Media};
 pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
 pub use freshness::{
     FreshnessBasis, FreshnessDecision, FreshnessPolicy, PublicationPrecision,

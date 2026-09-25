@@ -1,12 +1,13 @@
 //! Owned anonymous static acquisition: one `GET`, every hop proven.
 //!
 //! [`StaticAcquirer::acquire`] owns the whole transfer from a
-//! caller-supplied URL to a bounded response body, including every
-//! redirect. There is no trait to implement and no redirect convention to
-//! follow: the acquirer validates each hop itself, connects only to the
-//! addresses that validation produced, and records what it did in
-//! [`HopRecord`]s. No provider credential, budget, or spend ledger is
-//! involved; an anonymous `GET` costs nothing.
+//! caller-supplied URL to a bounded, decoded response body and its text,
+//! including every redirect. There is no trait to implement and no
+//! redirect convention to follow: the acquirer validates each hop itself,
+//! connects only to the addresses that validation produced, and records
+//! what it did in the [`crate::EvidenceEnvelope`] it returns. No provider
+//! credential, budget, or spend ledger is involved; an anonymous `GET`
+//! costs nothing.
 //!
 //! # Per-hop policy
 //!
@@ -73,10 +74,26 @@
 //! # Request shape
 //!
 //! `GET` over HTTP/1.1 with exactly `Host`, `User-Agent` (default
-//! `zetesis/<version>`), `Accept: */*`, `Accept-Encoding: identity`, and
-//! `Connection: close`. No cookies, credentials, `Referer`, request body,
-//! connection pool, proxy environment variables, automatic redirects, or
-//! automatic decompression. TLS offers only `http/1.1` through ALPN.
+//! `zetesis/<version>`), `Accept: */*`, `Accept-Encoding: gzip, deflate`,
+//! and `Connection: close`. No cookies, credentials, `Referer`, request
+//! body, connection pool, proxy environment variables, or automatic
+//! redirects. TLS offers only `http/1.1` through ALPN.
+//!
+//! # Content
+//!
+//! The final response's head is checked before any body byte is read: the
+//! content coding must be absent, `identity`, `gzip`, `x-gzip`, or
+//! `deflate` (one coding, never stacked), the media type must be
+//! `text/html`, `application/xhtml+xml`, or `text/plain` (a body the head
+//! declares empty needs none), and a declared `Content-Length` must fit
+//! [`AcquisitionLimits::max_body_bytes`]. The body then streams through a
+//! decoder that stops at the first chunk crossing the wire ceiling or the
+//! decoded ceiling ([`AcquisitionLimits::max_decoded_bytes`]), so a
+//! decompression bomb stops at the ceiling instead of allocating its
+//! expansion. Static text extraction (`zetesis.html_text`) runs on the
+//! decoded bytes within [`AcquisitionLimits::max_text_bytes`]; it executes
+//! no script and follows no subresource. A non-2xx status is recorded, not
+//! refused: the body is still evidence of what the origin served.
 //!
 //! # Results
 //!
@@ -85,11 +102,13 @@
 //! unusable domain-list entry, a deadline that overflows the clock). A
 //! requested URL carrying userinfo is refused as
 //! [`AcquisitionFailure::UnsafeTarget`] before any lookup and recorded with
-//! the userinfo removed, so a credential never enters hop evidence. Every policy refusal and transport
-//! failure, including a refused requested URL, is a
-//! [`TransferOutcome::Failed`] carrying the hop evidence gathered so far.
+//! the userinfo removed, so a credential never enters hop evidence. Every
+//! other outcome is an [`crate::Acquisition`]: its envelope's
+//! [`crate::Outcome`] is `complete`, `partial` (the transfer completed but
+//! the text is incomplete, with the reason), or `failed` (with the typed
+//! failure and the evidence gathered up to it).
 //!
-//! This module emits no `tracing` events; the returned [`Transfer`] is the
+//! This module emits no `tracing` events; the returned envelope is the
 //! record of what happened.
 
 mod connector;
@@ -106,6 +125,7 @@ use std::sync::Arc;
 
 use hyper::StatusCode;
 use hyper::header::{HeaderValue, LOCATION};
+use jiff::Timestamp;
 use snafu::ensure;
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
@@ -118,12 +138,16 @@ pub use self::connector::{
 pub use self::limits::{AcquisitionLimits, DowngradePolicy, SchemePolicy};
 pub use self::record::{
     AcquisitionFailure, ConnectAttempt, ConnectOutcome, HopRecord, ResponseRecord, TlsRecord,
-    Transfer, TransferOutcome,
 };
 pub use self::tls::TrustAnchors;
 use self::transport::Exchange;
 use crate::constraints::SearchConstraints;
 use crate::error::{Error, InvalidConstraintSnafu, Result};
+use crate::evidence::decode::{self, BodyDecoder, ContentCoding, DecodedBody};
+use crate::evidence::envelope::{
+    self, Acquisition, BodyRecord, EnvelopeParts, EvidenceEnvelope, Outcome, PartialReason,
+};
+use crate::evidence::media::{ContentType, Media};
 use crate::net_policy::{LocalTargetAuthorization, Resolver, SystemResolver, ValidatedTarget};
 
 /// `User-Agent` sent when the builder is not given one.
@@ -217,7 +241,8 @@ impl StaticAcquirer {
     }
 
     /// Fetch `url` with an anonymous `GET`, validating and recording every
-    /// hop (see the module documentation for the policy).
+    /// hop, then decode the body and extract its text (see the module
+    /// documentation for the policy).
     ///
     /// `local` is the only way to admit a loopback, private, or otherwise
     /// blocked address; pass `None` unless the process holds that authority
@@ -229,13 +254,14 @@ impl StaticAcquirer {
     /// [`AcquisitionLimits::max_url_bytes`], a domain list in `constraints`
     /// has an unusable entry, or the deadline cannot be represented. No DNS
     /// lookup or network attempt is made in any of these cases. Every other
-    /// failure is reported in the returned [`Transfer`].
+    /// outcome, including every refusal and transport failure, is reported
+    /// in the returned [`Acquisition`]'s envelope.
     pub async fn acquire(
         &self,
         url: &Url,
         constraints: &SearchConstraints,
         local: Option<&LocalTargetAuthorization>,
-    ) -> Result<Transfer> {
+    ) -> Result<Acquisition> {
         ensure!(
             url.as_str().len() <= self.limits.max_url_bytes(),
             InvalidConstraintSnafu {
@@ -257,6 +283,7 @@ impl StaticAcquirer {
                 }
                 .build()
             })?;
+        let started_at = Timestamp::now();
 
         if policy::has_userinfo(url) {
             // WHY: refused like any unsafe target, but recorded without the
@@ -265,59 +292,45 @@ impl StaticAcquirer {
             let failure = AcquisitionFailure::UnsafeTarget {
                 reason: "URL carries userinfo, which is never permitted".to_owned(),
             };
-            let hops = vec![HopRecord::new(recorded.clone())];
-            return Ok(Transfer::new(
-                recorded,
-                hops,
-                TransferOutcome::Failed { failure },
-            ));
+            let evidence = Evidence::new(recorded.clone());
+            return Ok(self.seal(recorded, started_at, evidence, Err(failure)));
         }
 
-        let mut done = Vec::new();
-        let mut current = HopRecord::new(url.clone());
-        let hops = Hops {
-            done: &mut done,
-            current: &mut current,
-        };
+        let mut evidence = Evidence::new(url.clone());
         let followed =
-            tokio::time::timeout_at(deadline, self.follow(hops, constraints, local)).await;
-        done.push(current);
-
-        let outcome = match followed {
-            Ok(Ok((response, body))) => TransferOutcome::Complete { response, body },
-            Ok(Err(failure)) => TransferOutcome::Failed { failure },
-            Err(_elapsed) => TransferOutcome::Failed {
-                failure: AcquisitionFailure::DeadlineExceeded {
-                    deadline_ms: self.limits.deadline_ms(),
-                },
-            },
-        };
-        Ok(Transfer::new(url.clone(), done, outcome))
+            tokio::time::timeout_at(deadline, self.follow(&mut evidence, constraints, local)).await;
+        let result = followed.unwrap_or_else(|_elapsed| {
+            Err(AcquisitionFailure::DeadlineExceeded {
+                deadline_ms: self.limits.deadline_ms(),
+            })
+        });
+        Ok(self.seal(url.clone(), started_at, evidence, result))
     }
 
-    /// Walk the redirect chain from `hops.current` until a final response
-    /// is accepted or a check fails.
+    /// Walk the redirect chain from `evidence.current` until a final
+    /// response's body is read or a check fails.
     async fn follow(
         &self,
-        hops: Hops<'_>,
+        evidence: &mut Evidence,
         constraints: &SearchConstraints,
         local: Option<&LocalTargetAuthorization>,
-    ) -> std::result::Result<(ResponseRecord, Vec<u8>), AcquisitionFailure> {
-        let Hops { done, current } = hops;
-        let mut visited = HashSet::from([policy::chain_key(current.url())]);
+    ) -> std::result::Result<Accepted, AcquisitionFailure> {
+        let mut visited = HashSet::from([policy::chain_key(evidence.current.url())]);
         let mut previous: Option<Url> = None;
         let mut redirects: u32 = 0;
         loop {
-            let url = current.url().clone();
+            let url = evidence.current.url().clone();
             let port = policy::check_hop(&url, previous.as_ref(), &self.limits)?;
             let target = self.validate(&url, port, constraints, local).await?;
-            current.set_resolved(target.addrs().to_vec());
-            let exchange = self.fetch_hop(&target, port, current).await?;
-            let Some(location) = redirect_location(&exchange)? else {
-                return accept(exchange, &self.limits).await;
+            evidence.current.set_resolved(target.addrs().to_vec());
+            let exchange = self.fetch_hop(&target, port, &mut evidence.current).await?;
+            let Some(location) = redirect_location(&url, &exchange)? else {
+                return accept(exchange, &self.limits, &mut evidence.response).await;
             };
             drop(exchange);
-            current.set_location(policy::location_text(&location));
+            evidence
+                .current
+                .set_location(policy::location_evidence(&url, &location));
             let next = policy::redirect_target(&url, &location, &self.limits)?;
             if policy::has_userinfo(&next) {
                 return Err(AcquisitionFailure::UnsafeTarget {
@@ -334,8 +347,63 @@ impl StaticAcquirer {
             }
             redirects += 1;
             previous = Some(url);
-            done.push(std::mem::replace(current, HopRecord::new(next)));
+            let done = std::mem::replace(&mut evidence.current, HopRecord::new(next));
+            evidence.done.push(done);
         }
+    }
+
+    /// Seal the gathered evidence into an envelope: decode-time records for
+    /// an accepted body, then extraction and the outcome.
+    fn seal(
+        &self,
+        requested_url: Url,
+        started_at: Timestamp,
+        evidence: Evidence,
+        result: std::result::Result<Accepted, AcquisitionFailure>,
+    ) -> Acquisition {
+        let Evidence {
+            mut done,
+            current,
+            response,
+        } = evidence;
+        done.push(current);
+        // NOTE: the final URL is the hop whose response head was accepted,
+        // even when reading its body then failed.
+        let final_url = response
+            .as_ref()
+            .and_then(|_| done.last().map(|hop| hop.url().clone()));
+        let (body_record, extraction, outcome, bytes) = match result {
+            Ok(accepted) => {
+                let body_record = BodyRecord::from_decoded(accepted.coding, &accepted.body);
+                let max_text = usize::try_from(self.limits.max_text_bytes()).unwrap_or(usize::MAX);
+                let (extraction, partial) = match accepted.media {
+                    Some(media) => envelope::extract(
+                        media,
+                        accepted.header_charset.as_deref(),
+                        &accepted.body.bytes,
+                        max_text,
+                    ),
+                    None => (None, Some(PartialReason::EmptyBody)),
+                };
+                let outcome =
+                    partial.map_or(Outcome::Complete, |reason| Outcome::Partial { reason });
+                (Some(body_record), extraction, outcome, accepted.body.bytes)
+            }
+            Err(failure) => (None, None, Outcome::Failed { failure }, Vec::new()),
+        };
+        let envelope = EvidenceEnvelope::seal(EnvelopeParts {
+            requested_url,
+            final_url,
+            started_at,
+            completed_at: Timestamp::now(),
+            limits: self.limits.clone(),
+            hops: done,
+            response,
+            body: body_record,
+            extraction,
+            outcome,
+        });
+        Acquisition::new(envelope, bytes)
     }
 
     /// Resolve (once) and run the network-target policy for one hop.
@@ -459,12 +527,34 @@ impl fmt::Debug for StaticAcquirerBuilder {
     }
 }
 
-/// Hop evidence written by the transfer future. It lives outside that
-/// future so a deadline that drops the future keeps the hops recorded so
-/// far, including the one in progress.
-struct Hops<'a> {
-    done: &'a mut Vec<HopRecord>,
-    current: &'a mut HopRecord,
+/// Evidence written by the transfer future. It lives outside that future
+/// so a deadline that drops the future keeps what was recorded so far:
+/// every hop, including the one in progress, and the final response head
+/// once it was accepted.
+struct Evidence {
+    done: Vec<HopRecord>,
+    current: HopRecord,
+    response: Option<ResponseRecord>,
+}
+
+impl Evidence {
+    fn new(requested: Url) -> Self {
+        Self {
+            done: Vec::new(),
+            current: HopRecord::new(requested),
+            response: None,
+        }
+    }
+}
+
+/// A final response whose body was read and decoded.
+struct Accepted {
+    coding: ContentCoding,
+    /// `None` when the head declared an empty body, so no media type was
+    /// required.
+    media: Option<Media>,
+    header_charset: Option<String>,
+    body: DecodedBody,
 }
 
 /// The single answer resolved for this hop, handed to the policy check so
@@ -551,6 +641,7 @@ impl ConnectFailures {
 /// The `Location` to follow, if this response is a redirect. A redirect
 /// status without `Location` is a final response.
 fn redirect_location(
+    url: &Url,
     exchange: &Exchange,
 ) -> std::result::Result<Option<HeaderValue>, AcquisitionFailure> {
     let redirect = matches!(
@@ -570,31 +661,64 @@ fn redirect_location(
     };
     if values.next().is_some() {
         return Err(AcquisitionFailure::MalformedRedirect {
-            location: policy::location_text(first),
+            location: policy::location_evidence(url, first),
             reason: "response carries more than one Location".to_owned(),
         });
     }
     Ok(Some(first.clone()))
 }
 
-/// Accept the final response: record its head, refuse content codings this
-/// acquirer does not decode, and read the bounded body.
+/// Accept the final response: record its head, refuse an unsupported
+/// coding, media type, or declared length before reading, then stream the
+/// body through the bounded decoder.
 async fn accept(
     exchange: Exchange,
     limits: &AcquisitionLimits,
-) -> std::result::Result<(ResponseRecord, Vec<u8>), AcquisitionFailure> {
-    let response = ResponseRecord::from_head(exchange.status().as_u16(), exchange.headers());
-    if let Some(coding) = response
-        .content_encoding()
-        .iter()
-        .find(|coding| coding.as_str() != "identity")
-    {
-        return Err(AcquisitionFailure::UnsupportedContentEncoding {
-            coding: coding.clone(),
+    recorded: &mut Option<ResponseRecord>,
+) -> std::result::Result<Accepted, AcquisitionFailure> {
+    let response = recorded.insert(ResponseRecord::from_head(
+        exchange.status().as_u16(),
+        exchange.headers(),
+    ));
+    let coding =
+        decode::parse_content_encoding(response.content_encoding().iter().map(String::as_str))
+            .map_err(transport::decode_failure)?;
+    let content_type = response.content_type().and_then(ContentType::parse);
+    let declared = exchange.declared_length();
+    if declared == Some(0) {
+        // NOTE: nothing is removed from an empty body, whatever coding the
+        // head names, and there is nothing whose media type matters.
+        let empty = BodyDecoder::new(ContentCoding::Identity, 0, 0)
+            .finish()
+            .map_err(transport::decode_failure)?;
+        return Ok(Accepted {
+            coding: ContentCoding::Identity,
+            media: None,
+            header_charset: None,
+            body: empty,
         });
     }
-    let body = exchange.read_body(limits.max_body_bytes()).await?;
-    Ok((response, body))
+    let Some(media) = content_type
+        .as_ref()
+        .and_then(|ct| Media::from_essence(&ct.essence))
+    else {
+        return Err(AcquisitionFailure::UnsupportedContentType {
+            media_type: content_type.map(|ct| ct.essence),
+        });
+    };
+    if declared.is_some_and(|length| length > limits.max_body_bytes()) {
+        return Err(AcquisitionFailure::WireLimit {
+            max_body_bytes: limits.max_body_bytes(),
+        });
+    }
+    let decoder = BodyDecoder::new(coding, limits.max_body_bytes(), limits.max_decoded_bytes());
+    let body = exchange.read_body(decoder).await?;
+    Ok(Accepted {
+        coding,
+        media: Some(media),
+        header_charset: content_type.and_then(|ct| ct.charset),
+        body,
+    })
 }
 
 #[cfg(test)]
@@ -642,7 +766,9 @@ mod tests {
             head.push(byte[0]);
         }
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nlocal")
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nlocal",
+            )
             .await
             .unwrap();
     }
@@ -658,6 +784,7 @@ mod tests {
         let constraints = SearchConstraints::default();
 
         let refused = acquirer.acquire(&url, &constraints, None).await.unwrap();
+        let refused = refused.envelope();
         assert!(
             matches!(
                 refused.failure(),
@@ -683,7 +810,7 @@ mod tests {
         let served = served.unwrap();
         assert_eq!(
             served.body(),
-            Some(b"local".as_slice()),
+            b"local".as_slice(),
             "the explicit authority admits the loopback target"
         );
     }

@@ -1,7 +1,8 @@
 //! Private one-hop HTTP/1.1 exchange over a stream the acquirer connected.
 //!
 //! One request per connection (`Connection: close`), no pool, no automatic
-//! redirects, no decompression. The hyper connection future is driven
+//! redirects. The body streams through a [`BodyDecoder`], which enforces
+//! the wire and decoded ceilings as bytes arrive. The hyper connection future is driven
 //! inline alongside the request and body futures instead of being spawned,
 //! so dropping the exchange closes the socket and no task outlives the
 //! call.
@@ -22,6 +23,7 @@ use url::Url;
 use super::connector::ConnectedStream;
 use super::limits::AcquisitionLimits;
 use super::record::AcquisitionFailure;
+use crate::evidence::decode::{self, BodyDecoder, DecodeError, DecodedBody};
 
 type Io = TokioIo<Box<dyn ConnectedStream>>;
 type Conn = Connection<Io, Empty<Bytes>>;
@@ -64,36 +66,53 @@ impl Exchange {
         self.response.headers()
     }
 
-    /// Read the body, stopping as soon as it would exceed `max_body_bytes`.
+    /// The body length the head declares (`Content-Length`, or zero for a
+    /// status that carries no body), when it declares one.
+    pub(crate) fn declared_length(&self) -> Option<u64> {
+        self.response.body().size_hint().exact()
+    }
+
+    /// Stream the body through `decoder`, stopping as soon as a chunk would
+    /// cross the wire or decoded ceiling. Nothing past a ceiling is kept.
     pub(crate) async fn read_body(
         self,
-        max_body_bytes: u64,
-    ) -> Result<Vec<u8>, AcquisitionFailure> {
+        mut decoder: BodyDecoder,
+    ) -> Result<DecodedBody, AcquisitionFailure> {
         let Self {
             mut driver,
             response,
         } = self;
         let mut body = response.into_body();
-        let over_limit = AcquisitionFailure::WireLimit { max_body_bytes };
-        if body.size_hint().lower() > max_body_bytes {
-            return Err(over_limit);
-        }
-        let capacity = body.size_hint().exact().unwrap_or(0);
-        let mut bytes = Vec::with_capacity(usize::try_from(capacity).unwrap_or(0));
-        let mut read: u64 = 0;
         while let Some(frame) = driver.run(body.frame()).await {
             let frame = frame.map_err(|source| exchange_failure(&source, 0))?;
             let Ok(data) = frame.into_data() else {
                 // NOTE: trailers carry no body bytes and are not recorded.
                 continue;
             };
-            read = read.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
-            if read > max_body_bytes {
-                return Err(over_limit);
-            }
-            bytes.extend_from_slice(&data);
+            decoder.push(&data).map_err(decode_failure)?;
         }
-        Ok(bytes)
+        decoder.finish().map_err(decode_failure)
+    }
+}
+
+/// Map a body-decoding refusal onto the failure taxonomy.
+pub(crate) fn decode_failure(error: DecodeError) -> AcquisitionFailure {
+    match error {
+        DecodeError::WireLimit { max } => AcquisitionFailure::WireLimit {
+            max_body_bytes: max,
+        },
+        DecodeError::DecodedLimit { max } => AcquisitionFailure::DecodedLimit {
+            max_decoded_bytes: max,
+        },
+        DecodeError::UnsupportedCoding { coding } => {
+            AcquisitionFailure::UnsupportedContentEncoding { coding }
+        }
+        DecodeError::StackedCodings { codings } => AcquisitionFailure::UnsupportedContentEncoding {
+            coding: codings.join(", "),
+        },
+        DecodeError::Corrupt { detail } => {
+            AcquisitionFailure::CorruptContentEncoding { reason: detail }
+        }
     }
 }
 
@@ -102,7 +121,8 @@ impl Exchange {
 ///
 /// The request carries exactly `Host` (the URL host, with the port when it
 /// is not the scheme default), `User-Agent`, `Accept: */*`,
-/// `Accept-Encoding: identity`, and `Connection: close`; no cookies,
+/// `Accept-Encoding: gzip, deflate` (exactly the codings [`BodyDecoder`]
+/// removes), and `Connection: close`; no cookies,
 /// credentials, `Referer`, or body.
 pub(crate) async fn send_get(
     stream: Box<dyn ConnectedStream>,
@@ -164,7 +184,10 @@ fn build_request(
         .header(HOST, host)
         .header(USER_AGENT, user_agent)
         .header(ACCEPT, HeaderValue::from_static("*/*"))
-        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+        .header(
+            ACCEPT_ENCODING,
+            HeaderValue::from_static(decode::ACCEPT_ENCODING),
+        )
         .header(CONNECTION, HeaderValue::from_static("close"))
         .body(Empty::new())
         .map_err(|source| AcquisitionFailure::HttpProtocol {

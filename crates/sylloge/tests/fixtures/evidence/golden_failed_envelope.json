@@ -1,0 +1,45 @@
+{
+  "schema": "zetesis.static_acquisition",
+  "schema_version": 1,
+  "producer": {
+    "package": "sylloge",
+    "version": "0.0.6"
+  },
+  "requested_url": "http://public.example/tides",
+  "final_url": null,
+  "started_at": "2026-09-22T10:00:01Z",
+  "completed_at": "2026-09-22T10:00:01Z",
+  "limits": {
+    "schemes": "http_and_https",
+    "downgrade": "refuse",
+    "max_redirects": 0,
+    "connect_timeout_ms": 5000,
+    "deadline_ms": 30000,
+    "max_body_bytes": 65536,
+    "max_decoded_bytes": 1048576,
+    "max_text_bytes": 4096,
+    "max_url_bytes": 8192,
+    "max_header_bytes": 417792
+  },
+  "hops": [
+    {
+      "url": "http://public.example/tides",
+      "resolved": [],
+      "connect_attempts": [],
+      "tls": null,
+      "status": null,
+      "location": null
+    }
+  ],
+  "response": null,
+  "body": null,
+  "extraction": null,
+  "outcome": {
+    "status": "failed",
+    "failure": {
+      "kind": "unsafe_target",
+      "reason": "URL carries userinfo, which is never permitted"
+    }
+  },
+  "fingerprint": "sha256:2711f0ecd20dc93b599845153ef1b2fad4bf5f82c58002d0b9eb4cfee2186046"
+}

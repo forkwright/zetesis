@@ -29,7 +29,15 @@ await_holding_lock = "deny"
 
 [workspace.dependencies]
 ciborium = "0.2"
+# WHY: gzip/deflate decoding for bounded static acquisition. The pure-Rust
+# miniz_oxide backend only: no C toolchain, no zlib system dependency.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures = "0.3"
+# WHY: the WHATWG named character reference table (2,231 entries, legacy
+# no-semicolon forms, numeric remapping) for static text extraction.
+# Chosen over html-escape, which leaves legacy and remapped references
+# undecoded; `unescape` is the only feature used.
+htmlize = { version = "1.1", default-features = false, features = ["unescape"] }
 # WHY: static acquisition needs `Empty` (the GET request body) and
 # `BodyExt::frame` (bounded incremental body reads). Its own dependencies
 # (bytes, http, http-body, pin-project-lite) are already in the graph through

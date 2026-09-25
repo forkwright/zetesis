@@ -199,7 +199,7 @@ baseline revision. The last column names the change that corrects each.
 
 | Contract | Owner | Zetesis provides | Consumer supplies | Status |
 |----------|-------|------------------|-------------------|--------|
-| Static acquisition | Zetesis | Target and per-hop validation, one-hop transport, bounded transfer and decoding, static text extraction, evidence envelope, fingerprint, replay | Invocation authority and its own resource reservation, `AcquisitionLimits`, `Resolver` and `Connector` adapters for its egress policy, body custody, verbatim envelope storage. Dioptron keeps sessions, rendering, scripted browsing, and browser actions. | Transport and per-hop validation implemented (Phase 01 S1); envelope planned (Phase 01 S2) |
+| Static acquisition | Zetesis | Target and per-hop validation, one-hop transport, bounded transfer and decoding, static text extraction, evidence envelope, fingerprint, replay | Invocation authority and its own resource reservation, `AcquisitionLimits`, `Resolver` and `Connector` adapters for its egress policy, body custody, verbatim envelope storage. Dioptron keeps sessions, rendering, scripted browsing, and browser actions. | Implemented: transport and per-hop validation (Phase 01 S1); decoding, extraction, envelope, fingerprint, and replay (Phase 01 S2) |
 | Provider search | Zetesis | `Provider` trait, normalized `ResearchResult`, citations and provenance, cost report, error class | Query, constraints, consumer scope identifier, credential references, explicit paid authorization | Trait implemented; adapters planned |
 | Budget and paid-spend ledger | Zetesis for paid provider spend; each consumer for its own invocation budget | Budget arithmetic today; the durable reservation ledger and its identities when zetesis#47 lands | Authenticated consumer identity, configured caps, the reservation of its own authority (for example Dioptron's invocation budget) | Arithmetic implemented in memory; ledger planned (zetesis#47) |
 | Cache | Zetesis | Keyed by query and attempt identity with per-provider freshness windows; never stores secret values | Nothing beyond scope identifiers | Planned (storage in Phase 03 S1) |
@@ -241,7 +241,7 @@ separately so that no two share an idempotency rule by accident.
 | Reservation | Minted by the ledger, keyed by attempt identity | At reserve | Reserve is idempotent per attempt identity: a second reserve returns the first. Settle and release are idempotent and terminal. Unknown upstream billing is recorded as unknown, never as zero. | `try_reserve` records an anonymous amount (`budget.rs:363-368`) |
 | Task | Minted by the research service at submit, bound to a consumer-supplied idempotency key | At submit | A resubmission with the same key after a lost response returns the same task | Provider-owned `TaskId`; per-instance counter in `LocalDeepResearch` |
 | Consumer emission | Task or query identity, consumer id, sink id, content digest | At emission | Sink delivery is idempotent on this identity; a fact emission stays a candidate until the consumer confirms it | None |
-| Static acquisition observation | The envelope fingerprint identifies content plus transformation | Each `acquire` call is a new observation | Zetesis charges nothing for anonymous GET. The consumer's invocation id and reservation live beside the envelope, never inside it. | None (Phase 01 S2) |
+| Static acquisition observation | The envelope fingerprint identifies content plus transformation | Each `acquire` call is a new observation | Zetesis charges nothing for anonymous GET. The consumer's invocation id and reservation live beside the envelope, never inside it. | None; fingerprint implemented (Phase 01 S2) |
 
 Consequences:
 
@@ -260,9 +260,18 @@ Consequences:
 ## 7. Evidence envelope v1
 
 Phase 01 S2 implements the envelope; Phase 01 S1 produces the hop records it
-contains. Field names are `snake_case` in JSON and CBOR. Only the outermost
+contains. Field names are `snake_case` in JSON and CBOR, and values have one
+shape in both (addresses are text in every format). Only the outermost
 record carries a version; nested value types are unversioned and change only
-through a new envelope version.
+through a new envelope version. The golden fixtures are
+`crates/sylloge/tests/fixtures/evidence/golden_envelope.json` (complete) and
+`golden_failed_envelope.json` (failed), with the source bytes beside them.
+
+As implemented, the schema differs from the Phase 00 draft of this section
+in four places, each recorded below: `BodyRecord` carries `coding` and no
+`complete` flag, `ExtractionRecord` has no `source_text_sha256`,
+`ResponseRecord` carries `retry_after`, and the fingerprint marks absent
+fields.
 
 ### 7.1 Fields
 
@@ -293,20 +302,27 @@ through a new envelope version.
 | `connect_attempts` | list of `{ addr, result }` | `addr` is a socket address; `result` is `connected`, `denied`, `refused`, `timed_out`, or `error` |
 | `tls` | optional `{ protocol_version, server_name, peer_leaf_sha256 }` | TLS facts for this hop |
 | `status` | optional `u16` | HTTP status |
-| `location` | optional string | Raw `Location` header value |
+| `location` | optional string | `Location` header value as received, except that a value resolving to a URL with userinfo is recorded as that URL without it and an unparseable value containing `@` is withheld |
 
 `ResponseRecord`: `status`, `content_type`, `content_encoding` (list),
-`content_length` (optional `u64`), `last_modified`, `etag`, `date`. Selected
-headers only; `Set-Cookie` is never recorded.
+`content_length` (optional `u64`), `last_modified`, `etag`, `date`,
+`retry_after` (as received). Selected headers only; `Set-Cookie` is never
+recorded.
 
-`BodyRecord`: `wire_bytes`, `wire_sha256`, `decoded_bytes`, `decoded_sha256`,
-`complete` (boolean).
+`BodyRecord`: `coding` (`identity`, `gzip`, or `deflate`), `wire_bytes`,
+`wire_sha256`, `decoded_bytes`, `decoded_sha256`. The record exists only
+when the whole body was read and decoded within the limits, so it carries no
+completeness flag; a body that stopped early leaves `body` absent and the
+outcome `failed`.
 
 `ExtractionRecord`: `extractor` (`{ id: "zetesis.html_text", version: 1 }`),
-`media`, `charset` (`{ label, source }` where `source` is `header`, `bom`,
-`meta`, or `assumed_utf8`), `source_text_sha256`, `text_sha256`, `text_bytes`,
-`segments` (list of `{ start, end, text }`, byte spans into the decoded UTF-8
-source), `truncated` (boolean).
+`media` (`html` or `plain_text`), `charset` (`{ label, source }` where
+`source` is `header`, `bom`, `meta`, or `assumed_utf8`), `segments` (list of
+`{ start, end, text }`, byte spans into the decoded body bytes), `text_bytes`,
+`text_sha256`, `truncated` (boolean). The version 1 charset subset decodes
+only UTF-8 (`crates/sylloge/src/evidence/media.rs`), so the source text is the decoded body and
+`decoded_sha256` already identifies it; a separate source-text digest would
+repeat it.
 
 ### 7.2 Outcomes
 
@@ -337,10 +353,11 @@ source), `truncated` (boolean).
 | `deadline_exceeded` | Whole-operation deadline elapsed | Transient |
 | `http_protocol` | Malformed HTTP response | Transient |
 | `header_limit` | Response header section exceeded its bound | Permanent |
-| `unsupported_content_encoding` | Encoding outside the supported set | Permanent |
-| `unsupported_content_type` | Media type outside the supported set | Permanent |
+| `unsupported_content_encoding` | Encoding outside `gzip`, `x-gzip`, `deflate`, or stacked codings | Permanent |
+| `unsupported_content_type` | Media type outside `text/html`, `application/xhtml+xml`, `text/plain`, or absent for a non-empty body | Permanent |
 | `wire_limit` | Wire bytes exceeded the limit | Permanent |
 | `decoded_limit` | Decoded bytes exceeded the limit | Permanent |
+| `corrupt_content_encoding` | The coded body is corrupt or ends before its trailer | Permanent |
 | `interrupted_stream` | The body stream ended or reset before completion | Transient |
 
 Permanent means the same request under the same limits and authority cannot
@@ -350,14 +367,22 @@ Zetesis-owned state (`FatalCorruption`).
 
 ### 7.3 Fingerprint
 
-`fingerprint` is SHA-256 over a domain-separated, length-prefixed encoding of,
-in order: schema id, `schema_version`, `requested_url`, `final_url`,
-`decoded_sha256`, extractor id, extractor version, `text_sha256`, and the
-outcome kind (`complete`, `partial`, `failed`). An absent optional value has
-its own marker, distinct from an empty value. Timestamps, addresses, and TLS
-details are excluded because they change on every fetch. Same content plus
-same transformation gives the same fingerprint. Phase 01 S2 fixes the exact
-byte layout and pins it with a golden fixture.
+`fingerprint` is `sha256:` and the lowercase hex SHA-256 over these fields,
+in order: schema id, `schema_version` (decimal), `requested_url`,
+`final_url`, `decoded_sha256`, extractor id, extractor version (decimal),
+`text_sha256`, and the outcome kind (`complete`, `partial:<reason>`, or
+`failed:<kind>`). A present field is the byte `0x01`, its UTF-8 length as a
+big-endian `u64`, then its bytes; an absent field is the single byte `0x00`,
+so absence never collides with an empty value. The schema id first
+separates this domain from any other record. Timestamps, addresses, TLS
+details, header values, and spans are excluded: they change per fetch or
+follow from the included fields. Same content plus same transformation
+gives the same fingerprint.
+
+Decoding recomputes the fingerprint and refuses a mismatch, which catches a
+corrupted or partially edited record. It is not a signature: anyone can
+recompute it, so authenticity rests on the consumer's custody of the stored
+envelope. Fields outside the identity are checked by `replay`.
 
 ### 7.4 Body custody and replay
 
@@ -371,10 +396,11 @@ byte layout and pins it with a golden fixture.
 
 | Result | Meaning |
 |--------|---------|
-| `Reproduced` | Body digest matches and re-extraction yields the recorded text digest |
-| `VersionMismatch` | The envelope's schema or extractor version is not the one this build implements |
+| `Reproduced` | Body digest matches and re-extraction yields exactly the recorded extraction record (segments, spans, text digest) |
+| `NothingToReplay` | The envelope recorded no body or no extraction (a failed outcome, or a partial one decided before extraction) |
+| `VersionMismatch` | The envelope's extractor version is not the one this build implements. An unknown schema version never decodes, so it cannot reach replay. |
 | `DigestMismatch` | The supplied body does not hash to `decoded_sha256` (a custody failure) |
-| `ExtractionDrift` | Same versions and same body, different extraction output (a determinism defect) |
+| `ExtractionDrift` | Same extractor version and same body, different extraction output, with the index of the first differing segment (a determinism defect or an altered record) |
 
 ## 8. Schema evolution
 
@@ -410,8 +436,8 @@ external standards.
 | Acquisition | Whole-operation deadline | duration | Caller-supplied; no crate ceiling has a landed or external source | Implemented (Phase 01 S1) |
 | Acquisition | Header bytes | bytes | 417,792 (`AcquisitionLimits::MAX_HEADER_BYTES_CEILING`, hyper's default read-buffer ceiling); floor 8,192 (`hyper` `max_buf_size` minimum) | Implemented (Phase 01 S1) |
 | Acquisition | Wire bytes | bytes | 10 MiB (`AcquisitionLimits::MAX_BODY_BYTES_CEILING`, carried from the retired `PageContent::MAX_BODY_BYTES`) | Implemented (Phase 01 S1) |
-| Acquisition | Decoded bytes | bytes | 10 MiB (same source) | Planned (Phase 01 S2) |
-| Acquisition | Text bytes | bytes | 4 MiB (`AcquisitionLimits::MAX_TEXT_BYTES_CEILING`, carried from the retired `PageContent::MAX_TEXT_BYTES`) | Planned (Phase 01 S2) |
+| Acquisition | Decoded bytes | bytes | 10 MiB (`AcquisitionLimits::MAX_DECODED_BYTES_CEILING`, the same retired `PageContent::MAX_BODY_BYTES`) | Implemented (Phase 01 S2) |
+| Acquisition | Text bytes | bytes | 4 MiB (`AcquisitionLimits::MAX_TEXT_BYTES_CEILING`, carried from the retired `PageContent::MAX_TEXT_BYTES`) | Implemented (Phase 01 S2) |
 | Acquisition | URL bytes | bytes | 8 KiB (`AcquisitionLimits::MAX_URL_BYTES_CEILING`, carried from the retired `PageContent::MAX_URL_BYTES`) | Implemented (Phase 01 S1) |
 | Provider search | Requests | count (`ProviderSpend::request_count`, `u32`) | Provider quota | Recorded per call; not enforced |
 | Provider search | Free-tier units | provider-defined (`ProviderSpend::free_tier_units`, `u64`) | Provider quota | Recorded per call; not enforced |
@@ -422,7 +448,7 @@ external standards.
 
 | Operation | Rule | Status |
 |-----------|------|--------|
-| Static acquisition | Dropping the `acquire` future cancels all work for that call; no background task survives; no envelope is produced. Deadline expiry is not cancellation: it yields `failed { deadline_exceeded }` with evidence. The consumer settles or releases its own reservation. | Implemented (Phase 01 S1); the envelope arrives in Phase 01 S2 |
+| Static acquisition | Dropping the `acquire` future cancels all work for that call; no background task survives; no envelope is produced. Deadline expiry is not cancellation: it yields `failed { deadline_exceeded }` with evidence. The consumer settles or releases its own reservation. | Implemented (Phase 01 S1 and S2) |
 | Provider search | Dropping `search` must not leak partial results or unrecorded spend (`provider.rs:44-50`). Once attempt identity exists, a drop after the request was sent is an unknown outcome; the ledger records it as unknown and a retry reuses the attempt identity. | Convention only; attempt identity planned |
 | Deep research, future | Dropping `submit` or `poll` is safe; dropping `fetch` is safe unless the backend deletes on retrieval (`deep.rs:44-51`). | Convention only |
 | Deep research, task | `cancel` is idempotent for pending, running, and cancelled tasks and refuses ready or failed tasks (`deep.rs:37-42`). `LocalDeepResearch::cancel_task` implements this; a cancelled task's in-flight offline result is discarded (`local_deep_research.rs:215-227`). | Implemented in `LocalDeepResearch` only |
@@ -498,6 +524,6 @@ Zetesis applies the Kanon storage decision tree (`STORAGE-TIERS`):
 |-----------------|-----------------|
 | Reviewed source and API delta | Sections 3 and 4 of this document, plus the Phase 00 S1 source changes |
 | Deterministic serialized fixtures | Golden fixtures added in `sylloge` (section 4.1) |
-| Malformed, unknown-version, overflow, and invalid-constraint tests in the owning packages | Malformed, overflow, and invalid-constraint tests in `sylloge` (section 4.1). Unknown-version tests land with the first versioned type in Phase 01 S2. |
+| Malformed, unknown-version, overflow, and invalid-constraint tests in the owning packages | Malformed, overflow, and invalid-constraint tests in `sylloge` (section 4.1). Unknown-version, foreign-schema, and fingerprint-mismatch tests for the evidence envelope in `crates/sylloge/tests/evidence_envelope.rs` (Phase 01 S2). |
 | Contract ownership table with no consumer cycle | Section 5 |
 | Stale Phase-0, scaffold, pricing, and host-command instructions retired | `README.md`, `CLAUDE.md`, `AGENTS.md`, `SECURITY.md`, `llms.txt`, `_llm/`, and `docs/research/deep-research-provider-decision.md` in the same change set; Rust doc drift listed in section 3.10 |

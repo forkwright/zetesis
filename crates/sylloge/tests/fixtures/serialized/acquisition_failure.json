@@ -44,7 +44,27 @@
     "max_header_bytes": 8192
   },
   {
+    "kind": "unsupported_content_encoding",
+    "coding": "gzip, br"
+  },
+  {
+    "kind": "unsupported_content_type",
+    "media_type": "application/pdf"
+  },
+  {
+    "kind": "unsupported_content_type",
+    "media_type": null
+  },
+  {
     "kind": "wire_limit",
     "max_body_bytes": 65536
+  },
+  {
+    "kind": "decoded_limit",
+    "max_decoded_bytes": 131072
+  },
+  {
+    "kind": "corrupt_content_encoding",
+    "reason": "corrupt deflate stream"
   }
 ]

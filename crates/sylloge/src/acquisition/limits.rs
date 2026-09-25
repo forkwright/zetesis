@@ -2,9 +2,9 @@
 //! against crate ceilings.
 //!
 //! No numeric limit has an invented default: the caller states the redirect
-//! budget, both timeouts, and the body cap. The URL and header-section caps
-//! default to their ceilings, which come only from landed or external
-//! sources (see each `*_CEILING` constant).
+//! budget, both timeouts, and the wire body cap. The decoded-body, text,
+//! URL, and header-section caps default to their ceilings, which come only
+//! from landed or external sources (see each `*_CEILING` constant).
 
 use std::time::Duration;
 
@@ -73,6 +73,8 @@ pub struct AcquisitionLimits {
     connect_timeout: Duration,
     deadline: Duration,
     max_body_bytes: u64,
+    max_decoded_bytes: u64,
+    max_text_bytes: u64,
     max_url_bytes: usize,
     max_header_bytes: usize,
 }
@@ -83,13 +85,18 @@ impl AcquisitionLimits {
     /// network error").
     pub const MAX_REDIRECTS_CEILING: u32 = 20;
 
-    /// Body ceiling in bytes (10 MiB), carried over from the retired
+    /// Wire body ceiling in bytes (10 MiB), carried over from the retired
     /// `PageContent::MAX_BODY_BYTES`.
     pub const MAX_BODY_BYTES_CEILING: u64 = 10 * 1024 * 1024;
 
+    /// Decoded body ceiling in bytes (10 MiB): the same retired
+    /// `PageContent::MAX_BODY_BYTES`, which bounded the body a consumer
+    /// held. Applies after the content coding is removed, so a small
+    /// compressed body cannot expand past it.
+    pub const MAX_DECODED_BYTES_CEILING: u64 = 10 * 1024 * 1024;
+
     /// Extracted-text ceiling in bytes (4 MiB), carried over from the
-    /// retired `PageContent::MAX_TEXT_BYTES` for the extraction stage that
-    /// consumes an acquired body.
+    /// retired `PageContent::MAX_TEXT_BYTES`.
     pub const MAX_TEXT_BYTES_CEILING: u64 = 4 * 1024 * 1024;
 
     /// URL ceiling in bytes (8 KiB), carried over from the retired
@@ -106,9 +113,10 @@ impl AcquisitionLimits {
     /// `max_buf_size` below its initial read buffer of 8192 bytes.
     pub const MIN_HEADER_BYTES: usize = 8192;
 
-    /// Build a profile. `max_url_bytes` and `max_header_bytes` start at
-    /// their ceilings and [`DowngradePolicy::Refuse`] applies; narrow them
-    /// with the `with_*` builders.
+    /// Build a profile. `max_decoded_bytes`, `max_text_bytes`,
+    /// `max_url_bytes`, and `max_header_bytes` start at their ceilings and
+    /// [`DowngradePolicy::Refuse`] applies; narrow them with the `with_*`
+    /// builders. `max_body_bytes` bounds the body as received on the wire.
     ///
     /// `connect_timeout` bounds each connection attempt; `deadline` bounds
     /// the whole operation (every resolution, connection, TLS handshake,
@@ -135,6 +143,8 @@ impl AcquisitionLimits {
             connect_timeout,
             deadline,
             max_body_bytes,
+            max_decoded_bytes: Self::MAX_DECODED_BYTES_CEILING,
+            max_text_bytes: Self::MAX_TEXT_BYTES_CEILING,
             max_url_bytes: Self::MAX_URL_BYTES_CEILING,
             max_header_bytes: Self::MAX_HEADER_BYTES_CEILING,
         }
@@ -146,6 +156,28 @@ impl AcquisitionLimits {
     pub fn with_downgrade(mut self, downgrade: DowngradePolicy) -> Self {
         self.downgrade = downgrade;
         self
+    }
+
+    /// Builder: narrow the decoded body cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConstraint`] when `max_decoded_bytes`
+    /// exceeds [`Self::MAX_DECODED_BYTES_CEILING`].
+    pub fn with_max_decoded_bytes(mut self, max_decoded_bytes: u64) -> Result<Self> {
+        self.max_decoded_bytes = max_decoded_bytes;
+        self.validated()
+    }
+
+    /// Builder: narrow the extracted-text cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConstraint`] when `max_text_bytes` exceeds
+    /// [`Self::MAX_TEXT_BYTES_CEILING`].
+    pub fn with_max_text_bytes(mut self, max_text_bytes: u64) -> Result<Self> {
+        self.max_text_bytes = max_text_bytes;
+        self.validated()
     }
 
     /// Builder: narrow the URL cap.
@@ -206,6 +238,18 @@ impl AcquisitionLimits {
         self.max_body_bytes
     }
 
+    /// Maximum accepted body after its content coding is removed.
+    #[must_use]
+    pub const fn max_decoded_bytes(&self) -> u64 {
+        self.max_decoded_bytes
+    }
+
+    /// Maximum extracted text, in UTF-8 bytes.
+    #[must_use]
+    pub const fn max_text_bytes(&self) -> u64 {
+        self.max_text_bytes
+    }
+
     /// Maximum accepted URL length, in bytes.
     #[must_use]
     pub const fn max_url_bytes(&self) -> usize {
@@ -248,6 +292,28 @@ impl AcquisitionLimits {
                     "max_body_bytes {} exceeds the ceiling {}",
                     self.max_body_bytes,
                     Self::MAX_BODY_BYTES_CEILING
+                ),
+            }
+        );
+        ensure!(
+            self.max_decoded_bytes <= Self::MAX_DECODED_BYTES_CEILING,
+            InvalidConstraintSnafu {
+                field: "max_decoded_bytes",
+                reason: format!(
+                    "max_decoded_bytes {} exceeds the ceiling {}",
+                    self.max_decoded_bytes,
+                    Self::MAX_DECODED_BYTES_CEILING
+                ),
+            }
+        );
+        ensure!(
+            self.max_text_bytes <= Self::MAX_TEXT_BYTES_CEILING,
+            InvalidConstraintSnafu {
+                field: "max_text_bytes",
+                reason: format!(
+                    "max_text_bytes {} exceeds the ceiling {}",
+                    self.max_text_bytes,
+                    Self::MAX_TEXT_BYTES_CEILING
                 ),
             }
         );
@@ -325,6 +391,8 @@ struct LimitsWire {
     connect_timeout_ms: u64,
     deadline_ms: u64,
     max_body_bytes: u64,
+    max_decoded_bytes: u64,
+    max_text_bytes: u64,
     max_url_bytes: usize,
     max_header_bytes: usize,
 }
@@ -340,6 +408,8 @@ impl TryFrom<LimitsWire> for AcquisitionLimits {
             connect_timeout: Duration::from_millis(wire.connect_timeout_ms),
             deadline: Duration::from_millis(wire.deadline_ms),
             max_body_bytes: wire.max_body_bytes,
+            max_decoded_bytes: wire.max_decoded_bytes,
+            max_text_bytes: wire.max_text_bytes,
             max_url_bytes: wire.max_url_bytes,
             max_header_bytes: wire.max_header_bytes,
         }
@@ -356,6 +426,8 @@ impl From<AcquisitionLimits> for LimitsWire {
             connect_timeout_ms: saturating_millis(limits.connect_timeout),
             deadline_ms: saturating_millis(limits.deadline),
             max_body_bytes: limits.max_body_bytes,
+            max_decoded_bytes: limits.max_decoded_bytes,
+            max_text_bytes: limits.max_text_bytes,
             max_url_bytes: limits.max_url_bytes,
             max_header_bytes: limits.max_header_bytes,
         }
@@ -451,6 +523,46 @@ mod tests {
             base.with_max_header_bytes(AcquisitionLimits::MIN_HEADER_BYTES)
                 .is_ok(),
             "the floor itself is valid"
+        );
+    }
+
+    #[test]
+    fn decoded_and_text_caps_default_to_and_stay_within_ceilings() {
+        let base = limits(0).unwrap();
+        assert_eq!(
+            base.max_decoded_bytes(),
+            AcquisitionLimits::MAX_DECODED_BYTES_CEILING,
+            "decoded cap starts at its ceiling"
+        );
+        assert_eq!(
+            base.max_text_bytes(),
+            AcquisitionLimits::MAX_TEXT_BYTES_CEILING,
+            "text cap starts at its ceiling"
+        );
+        let err = base
+            .clone()
+            .with_max_decoded_bytes(AcquisitionLimits::MAX_DECODED_BYTES_CEILING + 1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("max_decoded_bytes"),
+            "error must name the rejected field: {err}"
+        );
+        let err = base
+            .clone()
+            .with_max_text_bytes(AcquisitionLimits::MAX_TEXT_BYTES_CEILING + 1)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("max_text_bytes"),
+            "error must name the rejected field: {err}"
+        );
+        let narrowed = base
+            .with_max_decoded_bytes(64)
+            .and_then(|l| l.with_max_text_bytes(16))
+            .unwrap();
+        assert_eq!(
+            (narrowed.max_decoded_bytes(), narrowed.max_text_bytes()),
+            (64, 16),
+            "narrowing within the ceilings is kept"
         );
     }
 

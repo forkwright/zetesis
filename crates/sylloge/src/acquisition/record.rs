@@ -1,8 +1,7 @@
 //! Evidence records produced by [`super::StaticAcquirer::acquire`].
 //!
-//! Every record except [`Transfer`] (which owns the body bytes) is
-//! serializable with `snake_case` field names so an evidence envelope can
-//! embed it unchanged.
+//! Every record is serializable with `snake_case` field names so the
+//! [`crate::EvidenceEnvelope`] embeds it unchanged.
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
@@ -53,7 +52,9 @@ pub enum AcquisitionFailure {
     },
     /// A redirect `Location` could not be turned into a URL within limits.
     MalformedRedirect {
-        /// The `Location` value as received (lossy UTF-8).
+        /// The `Location` value as received (lossy UTF-8), except that
+        /// a value containing `@` is withheld, since an unparseable value
+        /// could carry a credential.
         location: String,
         /// Why it was rejected.
         reason: String,
@@ -108,18 +109,39 @@ pub enum AcquisitionFailure {
         /// The limit that was exceeded.
         max_header_bytes: usize,
     },
-    /// The response used a content coding other than `identity`, which this
-    /// acquirer does not decode.
+    /// The response used a content coding other than `gzip`, `x-gzip`,
+    /// or `deflate`, or stacked more than one coding. Refused before the
+    /// body is read.
     UnsupportedContentEncoding {
-        /// The first coding that is not `identity`.
+        /// The refused coding, or the stacked codings joined by `, `.
         coding: String,
     },
+    /// The response's media type is not one the acquirer extracts
+    /// (`text/html`, `text/plain`), or no `Content-Type` was sent for a
+    /// non-empty body. Refused before the body is read.
+    UnsupportedContentType {
+        /// The media type essence as received, lowercase; `None` when the
+        /// header was absent or unparseable.
+        media_type: Option<String>,
+    },
     /// The response body exceeded
-    /// [`super::AcquisitionLimits::max_body_bytes`]; reading stopped at the
-    /// limit.
+    /// [`super::AcquisitionLimits::max_body_bytes`] on the wire; reading
+    /// stopped at the limit.
     WireLimit {
         /// The limit that was exceeded.
         max_body_bytes: u64,
+    },
+    /// Removing the content coding would exceed
+    /// [`super::AcquisitionLimits::max_decoded_bytes`]; decoding stopped at
+    /// the limit.
+    DecodedLimit {
+        /// The limit that was exceeded.
+        max_decoded_bytes: u64,
+    },
+    /// The coded body is corrupt or ends before its trailer.
+    CorruptContentEncoding {
+        /// Decoder detail.
+        reason: String,
     },
     /// The connection closed or failed mid-exchange.
     InterruptedStream {
@@ -149,7 +171,10 @@ impl AcquisitionFailure {
             Self::HttpProtocol { .. } => "http_protocol",
             Self::HeaderLimit { .. } => "header_limit",
             Self::UnsupportedContentEncoding { .. } => "unsupported_content_encoding",
+            Self::UnsupportedContentType { .. } => "unsupported_content_type",
             Self::WireLimit { .. } => "wire_limit",
+            Self::DecodedLimit { .. } => "decoded_limit",
+            Self::CorruptContentEncoding { .. } => "corrupt_content_encoding",
             Self::InterruptedStream { .. } => "interrupted_stream",
         }
     }
@@ -179,7 +204,10 @@ impl AcquisitionFailure {
             | Self::HttpProtocol { .. }
             | Self::HeaderLimit { .. }
             | Self::UnsupportedContentEncoding { .. }
-            | Self::WireLimit { .. } => ErrorClass::Permanent,
+            | Self::UnsupportedContentType { .. }
+            | Self::WireLimit { .. }
+            | Self::DecodedLimit { .. }
+            | Self::CorruptContentEncoding { .. } => ErrorClass::Permanent,
         }
     }
 }
@@ -193,6 +221,7 @@ impl fmt::Display for AcquisitionFailure {
             | Self::ConnectFailed { reason }
             | Self::TlsFailed { reason }
             | Self::HttpProtocol { reason }
+            | Self::CorruptContentEncoding { reason }
             | Self::InterruptedStream { reason } => write!(f, "{kind}: {reason}"),
             Self::SchemeNotAllowed { scheme } => write!(f, "{kind}: {scheme}"),
             Self::DowngradeRefused => f.write_str(kind),
@@ -207,7 +236,12 @@ impl fmt::Display for AcquisitionFailure {
             Self::DeadlineExceeded { deadline_ms } => write!(f, "{kind}: {deadline_ms} ms"),
             Self::HeaderLimit { max_header_bytes } => write!(f, "{kind}: {max_header_bytes}"),
             Self::UnsupportedContentEncoding { coding } => write!(f, "{kind}: {coding}"),
+            Self::UnsupportedContentType { media_type } => match media_type {
+                Some(media_type) => write!(f, "{kind}: {media_type}"),
+                None => write!(f, "{kind}: no media type"),
+            },
             Self::WireLimit { max_body_bytes } => write!(f, "{kind}: {max_body_bytes}"),
+            Self::DecodedLimit { max_decoded_bytes } => write!(f, "{kind}: {max_decoded_bytes}"),
         }
     }
 }
@@ -235,6 +269,7 @@ pub enum ConnectOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectAttempt {
+    #[serde(with = "crate::serde_util::as_text")]
     addr: SocketAddr,
     result: ConnectOutcome,
 }
@@ -313,6 +348,7 @@ impl TlsRecord {
 #[serde(deny_unknown_fields)]
 pub struct HopRecord {
     url: Url,
+    #[serde(with = "crate::serde_util::list_as_text")]
     resolved: Vec<IpAddr>,
     connect_attempts: Vec<ConnectAttempt>,
     tls: Option<TlsRecord>,
@@ -392,7 +428,10 @@ impl HopRecord {
         self.status
     }
 
-    /// Raw `Location` value (lossy UTF-8) of a redirect response.
+    /// `Location` value of a redirect response: as received (lossy
+    /// UTF-8), except that a value resolving to a URL with userinfo is
+    /// recorded as that URL without it, and an unparseable value
+    /// containing `@` is withheld. No credential is ever recorded.
     #[must_use]
     pub fn location(&self) -> Option<&str> {
         self.location.as_deref()
@@ -415,11 +454,12 @@ pub struct ResponseRecord {
     last_modified: Option<String>,
     etag: Option<String>,
     date: Option<String>,
+    retry_after: Option<String>,
 }
 
 impl ResponseRecord {
     pub(crate) fn from_head(status: u16, headers: &hyper::HeaderMap) -> Self {
-        use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, DATE, ETAG, LAST_MODIFIED};
+        use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, DATE, ETAG, LAST_MODIFIED, RETRY_AFTER};
 
         let text = |name| {
             headers.get(name).map(|value: &hyper::header::HeaderValue| {
@@ -437,6 +477,7 @@ impl ResponseRecord {
             last_modified: text(LAST_MODIFIED),
             etag: text(ETAG),
             date: text(DATE),
+            retry_after: text(RETRY_AFTER),
         }
     }
 
@@ -481,6 +522,13 @@ impl ResponseRecord {
     pub fn date(&self) -> Option<&str> {
         self.date.as_deref()
     }
+
+    /// `Retry-After`, if present, as received. Recorded for any status;
+    /// it is meaningful on a 429, a 503, or a redirect.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<&str> {
+        self.retry_after.as_deref()
+    }
 }
 
 /// Every coding listed across all `Content-Encoding` headers, lowercase.
@@ -498,116 +546,6 @@ pub(crate) fn content_codings(headers: &hyper::HeaderMap) -> Vec<String> {
         .collect()
 }
 
-/// How an acquisition ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TransferOutcome {
-    /// The final hop's response was accepted and its body read in full.
-    Complete {
-        /// Selected headers of the accepted response.
-        response: ResponseRecord,
-        /// The identity-encoded body, at most
-        /// [`super::AcquisitionLimits::max_body_bytes`] long.
-        body: Vec<u8>,
-    },
-    /// The acquisition stopped; the hops record how far it got.
-    Failed {
-        /// Why it stopped.
-        failure: AcquisitionFailure,
-    },
-}
-
-/// The result of one [`super::StaticAcquirer::acquire`] call: the hop
-/// evidence and the outcome.
-///
-/// Only the acquirer builds one, so its hops are the ones the acquirer
-/// actually validated and attempted.
-///
-/// ```compile_fail
-/// # use sylloge::{Transfer, TransferOutcome, AcquisitionFailure};
-/// # use url::Url;
-/// let forged = Transfer {
-///     requested_url: Url::parse("https://example.org/").unwrap(),
-///     hops: Vec::new(),
-///     outcome: TransferOutcome::Failed { failure: AcquisitionFailure::DowngradeRefused },
-/// };
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Transfer {
-    requested_url: Url,
-    hops: Vec<HopRecord>,
-    outcome: TransferOutcome,
-}
-
-impl Transfer {
-    pub(crate) const fn new(
-        requested_url: Url,
-        hops: Vec<HopRecord>,
-        outcome: TransferOutcome,
-    ) -> Self {
-        Self {
-            requested_url,
-            hops,
-            outcome,
-        }
-    }
-
-    /// The URL the caller asked for (with any userinfo removed; such a URL
-    /// is always refused).
-    #[must_use]
-    pub const fn requested_url(&self) -> &Url {
-        &self.requested_url
-    }
-
-    /// Every hop considered, in order.
-    #[must_use]
-    pub fn hops(&self) -> &[HopRecord] {
-        &self.hops
-    }
-
-    /// How the acquisition ended.
-    #[must_use]
-    pub const fn outcome(&self) -> &TransferOutcome {
-        &self.outcome
-    }
-
-    /// The URL whose response was accepted, for a complete transfer.
-    #[must_use]
-    pub fn final_url(&self) -> Option<&Url> {
-        match self.outcome {
-            TransferOutcome::Complete { .. } => self.hops.last().map(HopRecord::url),
-            TransferOutcome::Failed { .. } => None,
-        }
-    }
-
-    /// The accepted response's selected headers, for a complete transfer.
-    #[must_use]
-    pub const fn response(&self) -> Option<&ResponseRecord> {
-        match &self.outcome {
-            TransferOutcome::Complete { response, .. } => Some(response),
-            TransferOutcome::Failed { .. } => None,
-        }
-    }
-
-    /// The body, for a complete transfer.
-    #[must_use]
-    pub fn body(&self) -> Option<&[u8]> {
-        match &self.outcome {
-            TransferOutcome::Complete { body, .. } => Some(body),
-            TransferOutcome::Failed { .. } => None,
-        }
-    }
-
-    /// The failure, for a transfer that stopped.
-    #[must_use]
-    pub const fn failure(&self) -> Option<&AcquisitionFailure> {
-        match &self.outcome {
-            TransferOutcome::Complete { .. } => None,
-            TransferOutcome::Failed { failure } => Some(failure),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,7 +557,17 @@ mod tests {
             AcquisitionFailure::DeniedPort { port: 25 },
             AcquisitionFailure::WireLimit { max_body_bytes: 1 },
             AcquisitionFailure::UnsupportedContentEncoding {
-                coding: "gzip".to_owned(),
+                coding: "br".to_owned(),
+            },
+            AcquisitionFailure::UnsupportedContentType {
+                media_type: Some("application/pdf".to_owned()),
+            },
+            AcquisitionFailure::UnsupportedContentType { media_type: None },
+            AcquisitionFailure::DecodedLimit {
+                max_decoded_bytes: 1,
+            },
+            AcquisitionFailure::CorruptContentEncoding {
+                reason: "invalid gzip header".to_owned(),
             },
         ];
         for failure in failures {

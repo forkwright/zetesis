@@ -17,6 +17,7 @@ use url::{Host, Url};
 
 use super::connector::ConnectedStream;
 use super::record::{AcquisitionFailure, TlsRecord};
+use crate::digest::sha256_hex;
 use crate::error::{InvalidConstraintSnafu, PermanentIoSnafu, Result};
 
 /// Root certificates an acquirer trusts for `https` hops.
@@ -152,7 +153,7 @@ pub(crate) async fn handshake(
     let peer_leaf_sha256 = session
         .peer_certificates()
         .and_then(<[CertificateDer<'_>]>::first)
-        .map(|leaf| hex_sha256(leaf.as_ref()))
+        .map(|leaf| sha256_hex(leaf.as_ref()))
         .unwrap_or_default();
     let record = TlsRecord::new(protocol_version, name_text, peer_leaf_sha256);
     let stream: Box<dyn ConnectedStream> = Box::new(tls);
@@ -199,21 +200,6 @@ fn handshake_failure(source: &std::io::Error) -> AcquisitionFailure {
     }
 }
 
-/// Lowercase hex SHA-256 of `bytes`.
-pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    digest
-        .as_ref()
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            // NOTE: writing to a String cannot fail.
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,15 +214,6 @@ mod tests {
         assert!(
             TrustAnchors::from_der([b"not a certificate".as_slice()]).is_err(),
             "unparseable DER must be refused"
-        );
-    }
-
-    #[test]
-    fn hex_sha256_matches_known_vector() {
-        assert_eq!(
-            hex_sha256(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            "FIPS 180-2 test vector for SHA-256(\"abc\")"
         );
     }
 

@@ -284,6 +284,8 @@ fn limits_json() -> serde_json::Value {
         "connect_timeout_ms": 1000,
         "deadline_ms": 10000,
         "max_body_bytes": 1024,
+        "max_decoded_bytes": 4096,
+        "max_text_bytes": 2048,
         "max_url_bytes": 2048,
         "max_header_bytes": 8192,
     })
@@ -303,6 +305,16 @@ fn acquisition_limits_above_a_ceiling_are_rejected_at_decode() {
             "max_body_bytes",
             serde_json::json!(10 * 1024 * 1024 + 1),
             "max_body_bytes",
+        ),
+        (
+            "max_decoded_bytes",
+            serde_json::json!(10 * 1024 * 1024 + 1),
+            "max_decoded_bytes",
+        ),
+        (
+            "max_text_bytes",
+            serde_json::json!(4 * 1024 * 1024 + 1),
+            "max_text_bytes",
         ),
         (
             "max_url_bytes",

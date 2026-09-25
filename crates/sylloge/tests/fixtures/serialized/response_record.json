@@ -5,5 +5,6 @@
   "content_length": 5,
   "last_modified": "Tue, 22 Sep 2026 10:00:00 GMT",
   "etag": "\"v1\"",
-  "date": null
+  "date": null,
+  "retry_after": "120"
 }

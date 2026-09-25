@@ -15,7 +15,8 @@ Pre-release (`0.0.x`). The four-crate workspace is present: `zetesis`,
 constraint, network-target, static-acquisition, citation, result, cost,
 budget, and deep-research lifecycle types; `zetesis` re-exports them as
 the facade. `elenkhos` and `synopsis` are marker types. The only HTTP
-client is `StaticAcquirer` (anonymous static GET). No provider adapter,
+client is `StaticAcquirer` (anonymous static GET, returning evidence
+envelope v1). No provider adapter,
 cache, durable ledger, model binding, or daemon exists yet.
 `docs/design/contract-baseline.md` records what each public type enforces
 and what is caller convention.

@@ -215,6 +215,10 @@ fn acquisition_limits_match_golden_fixture() {
         1024 * 1024,
     )
     .unwrap()
+    .with_max_decoded_bytes(2 * 1024 * 1024)
+    .unwrap()
+    .with_max_text_bytes(512 * 1024)
+    .unwrap()
     .with_max_url_bytes(2048)
     .unwrap()
     .with_max_header_bytes(64 * 1024)
@@ -255,8 +259,21 @@ fn acquisition_failures_match_golden_fixture() {
         AcquisitionFailure::HeaderLimit {
             max_header_bytes: 8192,
         },
+        AcquisitionFailure::UnsupportedContentEncoding {
+            coding: "gzip, br".to_owned(),
+        },
+        AcquisitionFailure::UnsupportedContentType {
+            media_type: Some("application/pdf".to_owned()),
+        },
+        AcquisitionFailure::UnsupportedContentType { media_type: None },
         AcquisitionFailure::WireLimit {
             max_body_bytes: 65_536,
+        },
+        AcquisitionFailure::DecodedLimit {
+            max_decoded_bytes: 131_072,
+        },
+        AcquisitionFailure::CorruptContentEncoding {
+            reason: "corrupt deflate stream".to_owned(),
         },
     ];
     assert_golden(
@@ -305,4 +322,9 @@ fn response_record_matches_golden_fixture() {
     assert_eq!(response.status(), 200, "status");
     assert_eq!(response.content_length(), Some(5), "content length");
     assert!(response.content_encoding().is_empty(), "identity body");
+    assert_eq!(
+        response.retry_after(),
+        Some("120"),
+        "Retry-After as received"
+    );
 }
