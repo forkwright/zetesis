@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "elenkhos"
-version = "0.0.6"
+version = "0.1.0"
 
 [[package]]
 name = "fastrand"
@@ -1102,7 +1102,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sylloge"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "ciborium",
  "flate2",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "synopsis"
-version = "0.0.6"
+version = "0.1.0"
 
 [[package]]
 name = "synstructure"
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "zetesis"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "elenkhos",
  "jiff",

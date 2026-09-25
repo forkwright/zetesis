@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.0](https://github.com/forkwright/zetesis/compare/v0.0.6...v0.1.0) (2026-09-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sylloge:** Provider has a single search method returning ProviderAnswer. ProviderAttempt gains evidence fingerprints; ErrorClass is serializable.
+* **sylloge:** acquire returns Acquisition; Transfer and TransferOutcome are removed. AcquisitionLimits gains max_decoded_bytes and max_text_bytes.
+* **sylloge:** Crawler and PageContent are removed; use StaticAcquirer. Their limit values are AcquisitionLimits ceilings.
+* **sylloge:** BudgetConstraint::phase_zero_default is removed; start from free_only() and set ceilings with the with_* builders.
+
+### Features
+
+* **sylloge:** bound transfer and return versioned evidence envelopes ([#90](https://github.com/forkwright/zetesis/issues/90)) ([5b02d63](https://github.com/forkwright/zetesis/commit/5b02d633820547699868234e71fff584e39cd53f))
+* **sylloge:** own static acquisition target proof through every hop ([#89](https://github.com/forkwright/zetesis/issues/89)) ([851a430](https://github.com/forkwright/zetesis/commit/851a4309e165c6f2fc4836194621dd7a24386137))
+* **sylloge:** route the free provider cohort through the static acquirer ([#92](https://github.com/forkwright/zetesis/issues/92)) ([474f7fc](https://github.com/forkwright/zetesis/commit/474f7fcf1d8fec4e8676f2c61bf9a4f1f4da9403))
+
+
+### Bug Fixes
+
+* **sylloge:** block IPv4 destinations carried in IPv6 transition forms ([#87](https://github.com/forkwright/zetesis/issues/87)) ([dc164e9](https://github.com/forkwright/zetesis/commit/dc164e9ae806b10c5c7b15ae13b009b159b32ba9))
+* **sylloge:** fail closed on unusable input and record the contract ([#85](https://github.com/forkwright/zetesis/issues/85)) ([0bff055](https://github.com/forkwright/zetesis/commit/0bff055193ba5bc0d594bb0468f0c4e682f7e39d))
+
 ## [0.0.6](https://github.com/forkwright/zetesis/compare/v0.0.5...v0.0.6) (2026-08-26)
 
 
