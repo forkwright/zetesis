@@ -11,6 +11,7 @@
 mod fixture;
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -24,8 +25,9 @@ use fixture::{
     duplex, ip, ok, raw, redirect, tls_identity,
 };
 use sylloge::{
-    Acquisition, AcquisitionFailure, AcquisitionLimits, BudgetConstraint, ConnectAttempt,
-    ConnectOutcome, DowngradePolicy, Error, ErrorClass, Outcome, ResponseRecord, SchemePolicy,
+    Acquisition, AcquisitionFailure, AcquisitionLimits, BodyRecord, BudgetConstraint,
+    CharsetSource, ConnectAttempt, ConnectOutcome, ContentCoding, DowngradePolicy, Error,
+    ErrorClass, ExtractionRecord, Outcome, PartialReason, ResponseRecord, SchemePolicy,
     SearchConstraints, StaticAcquirer, TrustAnchors,
 };
 
@@ -103,6 +105,16 @@ fn attempt(address: &str, result: ConnectOutcome) -> ConnectAttempt {
 /// returned, so any connection the acquirer made is already queued.
 fn has_pending_connection(listener: &TcpListener) -> bool {
     listener.accept().now_or_never().is_some()
+}
+
+/// Lowercase hex SHA-256 of `bytes`, computed with `ring` directly rather
+/// than through the crate under test.
+fn sha256(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    digest.as_ref().iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 // -- Positive fixtures: anonymous GET succeeds without paid authorization. --
@@ -221,14 +233,9 @@ async fn anonymous_https_get_sends_url_host_as_sni_and_host() {
         "TLSv1.3",
         "negotiated version recorded"
     );
-    let leaf = ring::digest::digest(&ring::digest::SHA256, &identity.leaf_der);
-    let expected = leaf.as_ref().iter().fold(String::new(), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    });
     assert_eq!(
         tls.peer_leaf_sha256(),
-        expected,
+        sha256(&identity.leaf_der),
         "leaf fingerprint recorded"
     );
 }
@@ -1162,4 +1169,914 @@ async fn acquire_future_is_send() {
         h.connector.attempts().is_empty(),
         "an unpolled future does nothing"
     );
+}
+
+// -- Phase 01 S2: bounded transfer and content evidence. --
+
+/// The URL every fixture in this section is served at.
+const ORIGIN: &str = "http://8.8.8.8/";
+
+/// A harness whose origin at 8.8.8.8:80 answers `/` with `reply` over an
+/// in-memory pipe, so `bytes_read` counts exactly what the client took.
+fn serving(limits: AcquisitionLimits, reply: Reply) -> Harness {
+    let h = Harness::new(limits, ScriptedResolver::new());
+    h.connector.route("8.8.8.8:80", duplex(vec![("/", reply)]));
+    h
+}
+
+/// `head` (through its blank line) and then `body`, written verbatim before
+/// the origin closes.
+fn head_then(head: &str, body: &[u8]) -> Reply {
+    let mut bytes = head.as_bytes().to_vec();
+    bytes.extend_from_slice(body);
+    Reply::Raw(bytes)
+}
+
+/// A `200 OK` with `headers` (each ending in CRLF), an exact
+/// `Content-Length`, and `body`.
+fn ok_body(headers: &str, body: &[u8]) -> Reply {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    head_then(&head, body)
+}
+
+/// A close-delimited `head` followed by filler until the client goes away:
+/// a client that read the body would run on to the wire limit.
+fn endless_after(head: &str) -> Reply {
+    Reply::Endless {
+        head: head.as_bytes().to_vec(),
+        written: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+/// The response-head buffer `tight_limits` applies. hyper never holds more
+/// than this before the body is consumed, so a transfer refused at the head
+/// reads at most this many bytes, however much body the origin offers.
+fn header_bytes() -> u64 {
+    u64::try_from(AcquisitionLimits::MIN_HEADER_BYTES).unwrap()
+}
+
+fn gzip(data: &[u8], level: flate2::Compression) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), level);
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// `data` in the zlib format, which is what HTTP `deflate` names.
+fn zlib(data: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn body_record(transfer: &Acquisition) -> &BodyRecord {
+    transfer.envelope().body().unwrap_or_else(|| {
+        panic!(
+            "expected a body record: {:?}",
+            transfer.envelope().outcome()
+        )
+    })
+}
+
+fn extraction(transfer: &Acquisition) -> &ExtractionRecord {
+    transfer.envelope().extraction().unwrap_or_else(|| {
+        panic!(
+            "expected an extraction: {:?}",
+            transfer.envelope().outcome()
+        )
+    })
+}
+
+fn partial(transfer: &Acquisition) -> &PartialReason {
+    let Outcome::Partial { reason } = transfer.envelope().outcome() else {
+        panic!(
+            "expected a partial outcome, got {:?}",
+            transfer.envelope().outcome()
+        );
+    };
+    reason
+}
+
+/// Segments as `(start, end, text)`, for comparison with literals.
+fn spans(record: &ExtractionRecord) -> Vec<(usize, usize, &str)> {
+    record
+        .segments
+        .iter()
+        .map(|segment| (segment.start, segment.end, segment.text.as_str()))
+        .collect()
+}
+
+/// A stopped transfer keeps no body: no record, no bytes, no extraction.
+fn assert_no_body(transfer: &Acquisition, case: &str) {
+    assert!(
+        transfer.envelope().body().is_none(),
+        "{case}: no body record"
+    );
+    assert!(transfer.body().is_empty(), "{case}: no body bytes");
+    assert!(
+        transfer.envelope().extraction().is_none(),
+        "{case}: no extraction"
+    );
+}
+
+/// 256 of these lines are 5120 bytes of text that compresses well.
+const LINE: &str = "compressed evidence\n";
+
+#[tokio::test]
+async fn gzip_body_under_wire_limit_but_over_decoded_limit_keeps_no_body() {
+    let wire = gzip(LINE.repeat(256).as_bytes(), flate2::Compression::default());
+    assert!(
+        u64::try_from(wire.len()).unwrap() < BODY,
+        "precondition: {} wire bytes fit the wire limit",
+        wire.len()
+    );
+    let reply = ok_body(
+        "Content-Type: text/plain\r\nContent-Encoding: gzip\r\n",
+        &wire,
+    );
+    let decoded_limit = |max| {
+        limits(SchemePolicy::HttpAndHttps, 0)
+            .with_max_decoded_bytes(max)
+            .unwrap()
+    };
+
+    let h = serving(decoded_limit(5_119), reply.clone());
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        failure(&transfer),
+        &AcquisitionFailure::DecodedLimit {
+            max_decoded_bytes: 5_119
+        },
+        "5120 decoded bytes cross a 5119-byte ceiling"
+    );
+    assert_no_body(&transfer, "decoded limit");
+    assert_eq!(
+        transfer.envelope().response().unwrap().content_encoding(),
+        ["gzip"],
+        "the accepted head is recorded"
+    );
+    assert_eq!(
+        transfer.envelope().final_url().map(Url::as_str),
+        Some(ORIGIN),
+        "the final URL is the hop whose head was accepted"
+    );
+
+    let h = serving(decoded_limit(5_120), reply);
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        transfer.envelope().outcome(),
+        &Outcome::Complete,
+        "a body that exactly fills the decoded ceiling is accepted"
+    );
+    assert_eq!(
+        body_record(&transfer).decoded_bytes,
+        5_120,
+        "all of it is kept"
+    );
+}
+
+#[tokio::test]
+async fn decompression_bomb_stops_reading_at_the_decoded_ceiling() {
+    let bomb = gzip(&vec![0_u8; 8 * 1024 * 1024], flate2::Compression::default());
+    let wire = u64::try_from(bomb.len()).unwrap();
+    assert!(
+        wire < 16 * 1024,
+        "precondition: 8 MiB of zeros is only {wire} bytes on the wire"
+    );
+    // NOTE: `Reply::Endless` writes `head` verbatim and then filler until the
+    // client goes away. Carrying the bomb in it gives the body an unbounded
+    // tail, so a client that kept reading would run on to the wire limit.
+    let mut head = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\
+                     Connection: close\r\n\r\n"
+        .to_vec();
+    head.extend_from_slice(&bomb);
+    let written = Arc::new(AtomicU64::new(0));
+    let h = serving(
+        tight_limits().with_max_decoded_bytes(64 * 1024).unwrap(),
+        Reply::Endless {
+            head,
+            written: Arc::clone(&written),
+        },
+    );
+    let started = std::time::Instant::now();
+
+    let transfer = h.get(ORIGIN).await;
+
+    let elapsed = started.elapsed();
+    assert_eq!(
+        failure(&transfer),
+        &AcquisitionFailure::DecodedLimit {
+            max_decoded_bytes: 65_536
+        },
+        "the bomb stops at the decoded ceiling, not the wire limit"
+    );
+    assert_no_body(&transfer, "bomb");
+    let read = h.connector.bytes_read();
+    assert!(
+        read <= wire + header_bytes(),
+        "reading stopped within the bomb: read {read} bytes for a {wire}-byte bomb"
+    );
+    assert!(
+        written.load(Ordering::SeqCst) <= read + 2 * header_bytes(),
+        "the origin could not push much of the tail past what was read"
+    );
+    // WHY: a generous wall-clock bound; stopping at 64 KiB takes
+    // milliseconds, and the bound only catches a decoder that ran on.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the bomb was refused quickly: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn compressed_body_over_wire_limit_is_wire_limit() {
+    // WHY: stored (uncompressed) deflate blocks keep the wire size above the
+    // text size, so only the wire ceiling can trip.
+    let wire = gzip(
+        LINE.repeat(16 * 1024).as_bytes(),
+        flate2::Compression::none(),
+    );
+    assert!(
+        u64::try_from(wire.len()).unwrap() > 4 * BODY,
+        "precondition: {} wire bytes are far over the wire limit",
+        wire.len()
+    );
+    let coded = "Content-Type: text/plain\r\nContent-Encoding: gzip\r\n";
+
+    let streamed = serving(
+        tight_limits(),
+        head_then(
+            &format!("HTTP/1.1 200 OK\r\n{coded}Connection: close\r\n\r\n"),
+            &wire,
+        ),
+    );
+    let transfer = streamed.get(ORIGIN).await;
+    assert_eq!(
+        failure(&transfer),
+        &AcquisitionFailure::WireLimit {
+            max_body_bytes: BODY
+        },
+        "a close-delimited compressed body stops at the wire limit"
+    );
+    assert_no_body(&transfer, "streamed");
+    let read = streamed.connector.bytes_read();
+    assert!(
+        read <= BODY + 2 * header_bytes(),
+        "reading stopped at the limit: read {read} bytes of {}",
+        wire.len()
+    );
+
+    let declared = serving(tight_limits(), ok_body(coded, &wire));
+    let transfer = declared.get(ORIGIN).await;
+    assert_eq!(
+        failure(&transfer),
+        &AcquisitionFailure::WireLimit {
+            max_body_bytes: BODY
+        },
+        "a declared compressed length over the limit is refused"
+    );
+    assert_no_body(&transfer, "declared");
+    assert!(
+        declared.connector.bytes_read() <= header_bytes(),
+        "the declared body was not read: {} bytes",
+        declared.connector.bytes_read()
+    );
+}
+
+/// A page served under a content coding: 3 + 19 + 4 = 26 bytes, whose text
+/// `Compressed evidence` spans bytes 3..22.
+const CODED_PAGE: &str = "<p>Compressed evidence</p>";
+
+/// Assert the evidence for [`CODED_PAGE`] sent as `wire` under `coding`.
+fn assert_coded_page(transfer: &Acquisition, coding: ContentCoding, wire: &[u8]) {
+    assert_eq!(
+        transfer.envelope().outcome(),
+        &Outcome::Complete,
+        "{coding:?} page completes"
+    );
+    assert_eq!(
+        transfer.body(),
+        CODED_PAGE.as_bytes(),
+        "{coding:?}: the decoded bytes are the plain page"
+    );
+    let body = body_record(transfer);
+    assert_eq!(body.coding, coding, "the removed coding is recorded");
+    assert_eq!(
+        body.wire_bytes,
+        u64::try_from(wire.len()).unwrap(),
+        "{coding:?}: wire count is the coded bytes sent"
+    );
+    assert_eq!(
+        body.wire_sha256,
+        sha256(wire),
+        "{coding:?}: wire digest is over the coded bytes sent"
+    );
+    assert_eq!(body.decoded_bytes, 26, "{coding:?}: decoded count");
+    assert_eq!(
+        body.decoded_sha256,
+        sha256(b"<p>Compressed evidence</p>"),
+        "{coding:?}: decoded digest is over the plain page"
+    );
+    let text = extraction(transfer);
+    assert_eq!(
+        spans(text),
+        [(3, 22, "Compressed evidence")],
+        "{coding:?}: text and span index the decoded bytes"
+    );
+    assert_eq!(
+        text.text_sha256,
+        sha256(b"Compressed evidence"),
+        "{coding:?}: text digest"
+    );
+}
+
+#[tokio::test]
+async fn gzip_body_records_coding_and_exact_digests() {
+    let wire = gzip(CODED_PAGE.as_bytes(), flate2::Compression::default());
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body(
+            "Content-Type: text/html\r\nContent-Encoding: gzip\r\n",
+            &wire,
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_coded_page(&transfer, ContentCoding::Gzip, &wire);
+}
+
+#[tokio::test]
+async fn deflate_body_is_zlib_and_records_coding_and_exact_digests() {
+    let wire = zlib(CODED_PAGE.as_bytes());
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body(
+            "Content-Type: text/html\r\nContent-Encoding: deflate\r\n",
+            &wire,
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_coded_page(&transfer, ContentCoding::Deflate, &wire);
+}
+
+#[tokio::test]
+async fn x_gzip_is_accepted_as_gzip() {
+    let wire = gzip(CODED_PAGE.as_bytes(), flate2::Compression::default());
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body(
+            "Content-Type: text/html\r\nContent-Encoding: x-gzip\r\n",
+            &wire,
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_coded_page(&transfer, ContentCoding::Gzip, &wire);
+    assert_eq!(
+        transfer.envelope().response().unwrap().content_encoding(),
+        ["x-gzip"],
+        "the head records the coding as received"
+    );
+}
+
+#[tokio::test]
+async fn content_length_understating_the_body_keeps_only_declared_bytes() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        head_then(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\
+             Connection: close\r\n\r\n",
+            b"helloSMUGGLED-TAIL",
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        transfer.envelope().outcome(),
+        &Outcome::Complete,
+        "the declared body completes"
+    );
+    assert_eq!(
+        transfer.body(),
+        b"hello",
+        "only the declared bytes are body"
+    );
+    let body = body_record(&transfer);
+    assert_eq!(
+        (body.wire_bytes, body.decoded_bytes),
+        (5, 5),
+        "both counts stop at the declared length"
+    );
+    assert_eq!(body.wire_sha256, sha256(b"hello"), "wire digest");
+    assert_eq!(body.decoded_sha256, sha256(b"hello"), "decoded digest");
+    assert_eq!(
+        spans(extraction(&transfer)),
+        [(0, 5, "hello")],
+        "text comes from the declared bytes"
+    );
+    let evidence = serde_json::to_string(transfer.envelope()).unwrap();
+    assert!(
+        !evidence.contains("SMUGGLED"),
+        "bytes past the declared length never enter the evidence: {evidence}"
+    );
+}
+
+#[tokio::test]
+async fn content_length_overstating_the_body_is_interrupted_stream() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        head_then(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\
+             Connection: close\r\n\r\n",
+            b"only ten b",
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    let stopped = failure(&transfer);
+    assert!(
+        matches!(stopped, AcquisitionFailure::InterruptedStream { .. }),
+        "a close before the declared length is an interrupted stream: {stopped:?}"
+    );
+    assert_eq!(stopped.class(), ErrorClass::Transient, "retryable");
+    assert_no_body(&transfer, "short body");
+    let response = transfer.envelope().response().unwrap();
+    assert_eq!(
+        (response.status(), response.content_length()),
+        (200, Some(100)),
+        "the accepted head is kept"
+    );
+    assert_eq!(
+        transfer.envelope().final_url().map(Url::as_str),
+        Some(ORIGIN),
+        "the final URL is the hop whose head was accepted"
+    );
+}
+
+#[tokio::test]
+async fn chunked_body_cut_mid_chunk_is_interrupted_stream() {
+    // NOTE: A complete 5-byte chunk, then a 10-byte chunk cut after 5 bytes.
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        head_then(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\
+             Connection: close\r\n\r\n",
+            b"5\r\nhello\r\na\r\n01234",
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    let stopped = failure(&transfer);
+    assert!(
+        matches!(stopped, AcquisitionFailure::InterruptedStream { .. }),
+        "a chunk cut short is an interrupted stream: {stopped:?}"
+    );
+    assert_eq!(
+        transfer.envelope().outcome().failure_class(),
+        Some(ErrorClass::Transient),
+        "an interrupted stream is transient"
+    );
+    assert_no_body(&transfer, "cut chunk");
+    let [hop] = transfer.envelope().hops() else {
+        panic!("one hop expected: {:?}", transfer.envelope().hops());
+    };
+    assert_eq!(
+        hop.connect_attempts(),
+        [attempt("8.8.8.8:80", ConnectOutcome::Connected)],
+        "the connection is recorded"
+    );
+    assert_eq!(hop.status(), Some(200), "the hop status is recorded");
+    assert_eq!(
+        transfer.envelope().response().map(ResponseRecord::status),
+        Some(200),
+        "the response head is recorded"
+    );
+}
+
+#[tokio::test]
+async fn unsupported_header_charset_is_partial_with_the_body_kept() {
+    // NOTE: "日本" in Shift_JIS: the label is refused before the bytes are judged.
+    let page = b"<p>\x93\xfa\x96\x7b</p>";
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html; charset=shift_jis\r\n", page),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        partial(&transfer),
+        &PartialReason::UnsupportedCharset {
+            label: "shift_jis".to_owned()
+        },
+        "a label outside the UTF-8 subset is reported, not decoded"
+    );
+    assert!(
+        transfer.envelope().extraction().is_none(),
+        "no text is extracted"
+    );
+    let body = body_record(&transfer);
+    assert_eq!(body.decoded_bytes, 11, "the body is kept whole");
+    assert_eq!(body.decoded_sha256, sha256(page), "body digest");
+    assert_eq!(transfer.body(), page, "the body bytes are returned");
+}
+
+#[tokio::test]
+async fn invalid_utf8_is_partial_at_the_first_invalid_offset() {
+    // NOTE: `<p>` 0..3, "na" 3..5, "ï" 5..7, "ve " 7..10, then 0xFF at 10.
+    let page = b"<p>na\xC3\xAFve \xFF</p>";
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html; charset=utf-8\r\n", page),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        partial(&transfer),
+        &PartialReason::InvalidEncoding { valid_up_to: 10 },
+        "the first invalid byte is located"
+    );
+    assert!(
+        transfer.envelope().extraction().is_none(),
+        "no lossy text is extracted"
+    );
+    let body = body_record(&transfer);
+    assert_eq!(body.decoded_bytes, 15, "the body is kept whole");
+    assert_eq!(body.decoded_sha256, sha256(page), "body digest");
+}
+
+#[tokio::test]
+async fn meta_windows_1252_on_an_ascii_page_is_complete() {
+    // NOTE: `<meta charset="windows-1252">` 0..29, `<p>` 29..32, text 32..43.
+    let page = b"<meta charset=\"windows-1252\"><p>Plain ASCII</p>";
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html\r\n", page),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        transfer.envelope().outcome(),
+        &Outcome::Complete,
+        "ASCII bytes decode the same in windows-1252 and UTF-8"
+    );
+    let text = extraction(&transfer);
+    assert_eq!(
+        (text.charset.label.as_str(), text.charset.source),
+        ("windows-1252", CharsetSource::Meta),
+        "the meta declaration is the recorded decision"
+    );
+    assert_eq!(spans(text), [(32, 43, "Plain ASCII")], "text and span");
+}
+
+#[tokio::test]
+async fn pdf_content_type_is_refused_before_the_body() {
+    let h = serving(
+        tight_limits(),
+        endless_after(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nConnection: close\r\n\r\n",
+        ),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        failure(&transfer),
+        &AcquisitionFailure::UnsupportedContentType {
+            media_type: Some("application/pdf".to_owned())
+        },
+        "PDF is not a media type the acquirer extracts"
+    );
+    assert!(
+        h.connector.bytes_read() <= header_bytes(),
+        "the endless body was not read: {} bytes",
+        h.connector.bytes_read()
+    );
+    assert_no_body(&transfer, "pdf");
+    assert_eq!(
+        transfer.envelope().response().unwrap().content_type(),
+        Some("application/pdf"),
+        "the refused head is recorded"
+    );
+}
+
+#[tokio::test]
+async fn missing_content_type_on_a_non_empty_body_is_refused_before_the_body() {
+    let h = serving(
+        tight_limits(),
+        endless_after("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        failure(&transfer),
+        &AcquisitionFailure::UnsupportedContentType { media_type: None },
+        "a body without a media type is refused"
+    );
+    assert!(
+        h.connector.bytes_read() <= header_bytes(),
+        "the endless body was not read: {} bytes",
+        h.connector.bytes_read()
+    );
+    assert_no_body(&transfer, "no content type");
+}
+
+#[tokio::test]
+async fn no_content_without_content_type_is_empty_body() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        head_then("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", b""),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        partial(&transfer),
+        &PartialReason::EmptyBody,
+        "a 204 needs no media type and has no text"
+    );
+    let body = body_record(&transfer);
+    assert_eq!(body.coding, ContentCoding::Identity, "nothing to decode");
+    assert_eq!(
+        (body.wire_bytes, body.decoded_bytes),
+        (0, 0),
+        "an empty body is recorded"
+    );
+    assert_eq!(body.decoded_sha256, sha256(b""), "digest of nothing");
+    assert!(transfer.envelope().extraction().is_none(), "no extraction");
+    assert_eq!(
+        transfer.envelope().response().map(ResponseRecord::status),
+        Some(204),
+        "status recorded"
+    );
+}
+
+#[tokio::test]
+async fn nul_byte_inside_the_sniff_window_is_binary_content() {
+    // NOTE: The NUL is byte 1444, the last of the 1445 sniffed bytes.
+    let mut inside = vec![b'a'; 1_444];
+    inside.push(0);
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/plain\r\n", &inside),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        partial(&transfer),
+        &PartialReason::BinaryContent,
+        "a binary data byte in the sniff window"
+    );
+    assert!(
+        transfer.envelope().extraction().is_none(),
+        "no text is extracted"
+    );
+    assert_eq!(
+        body_record(&transfer).decoded_bytes,
+        1_445,
+        "the body is kept"
+    );
+
+    // NOTE: One byte later, the NUL is outside the window.
+    let mut outside = vec![b'a'; 1_445];
+    outside.push(0);
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/plain\r\n", &outside),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        transfer.envelope().outcome(),
+        &Outcome::Complete,
+        "only the first 1445 bytes are sniffed"
+    );
+}
+
+#[tokio::test]
+async fn zero_content_length_html_is_empty_body() {
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html\r\n", b""),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(partial(&transfer), &PartialReason::EmptyBody, "no bytes");
+    let body = body_record(&transfer);
+    assert_eq!(
+        (body.wire_bytes, body.decoded_bytes),
+        (0, 0),
+        "an empty body is recorded"
+    );
+    assert!(transfer.envelope().extraction().is_none(), "no extraction");
+    assert_eq!(
+        transfer.envelope().response().unwrap().content_length(),
+        Some(0),
+        "declared length recorded"
+    );
+}
+
+#[tokio::test]
+async fn script_only_page_is_no_static_text() {
+    let page = b"<html><body><script>render()</script></body></html>";
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html\r\n", page),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        partial(&transfer),
+        &PartialReason::NoStaticText,
+        "scripts and nothing else"
+    );
+    let text = extraction(&transfer);
+    assert!(text.segments.is_empty(), "no segments: {:?}", text.segments);
+    assert_eq!(text.text_bytes, 0, "no text");
+    assert_eq!(text.text_sha256, sha256(b""), "digest of no text");
+    assert!(!text.truncated, "not a text-limit stop");
+    assert_eq!(transfer.body(), page, "the body is kept");
+}
+
+#[tokio::test]
+async fn text_ceiling_truncates_extraction() {
+    // NOTE: Budget 8: "alpha" (5), one space (6), then "be" of "beta" (8).
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0)
+            .with_max_text_bytes(8)
+            .unwrap(),
+        ok_body("Content-Type: text/plain\r\n", b"alpha beta gamma"),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(
+        partial(&transfer),
+        &PartialReason::TextLimitReached,
+        "the text ceiling stopped extraction"
+    );
+    let text = extraction(&transfer);
+    assert!(text.truncated, "the extraction says it was cut");
+    assert!(
+        text.text_bytes <= 8,
+        "{} bytes over the cap",
+        text.text_bytes
+    );
+    assert_eq!(spans(text), [(0, 8, "alpha be")], "text stops at the cap");
+    assert_eq!(text.text_sha256, sha256(b"alpha be"), "text digest");
+    assert_eq!(
+        body_record(&transfer).decoded_bytes,
+        16,
+        "the body is kept whole"
+    );
+}
+
+#[tokio::test]
+async fn extracted_spans_index_the_decoded_body() {
+    // NOTE: `<html><body><h1>` 0..16, "Report" 16..22, `</h1><p>` 22..30,
+    // "Alpha &amp; <b>beta" 30..49, `</b></p></body></html>` 49..71.
+    let page = b"<html><body><h1>Report</h1><p>Alpha &amp; <b>beta</b></p></body></html>";
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html\r\n", page),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    assert_eq!(transfer.envelope().outcome(), &Outcome::Complete, "text");
+    let text = extraction(&transfer);
+    assert_eq!(
+        spans(text),
+        [(16, 22, "Report"), (30, 49, "Alpha & beta")],
+        "block elements split segments; inline markup does not"
+    );
+    let sources: Vec<&[u8]> = text
+        .segments
+        .iter()
+        .map(|segment| &transfer.body()[segment.start..segment.end])
+        .collect();
+    assert_eq!(
+        sources,
+        [b"Report".as_slice(), b"Alpha &amp; <b>beta".as_slice()],
+        "each span slices the source markup of its segment"
+    );
+    assert_eq!(text.text_bytes, 19, "segments joined by one newline");
+    assert_eq!(
+        text.text_sha256,
+        sha256(b"Report\nAlpha & beta"),
+        "text digest"
+    );
+    assert_eq!(
+        text.charset.source,
+        CharsetSource::AssumedUtf8,
+        "no declaration"
+    );
+}
+
+#[tokio::test]
+async fn spans_after_a_byte_order_mark_index_the_decoded_body() {
+    // NOTE: BOM 0..3, `<p>` 3..6, "naïve café" 6..18 (ï and é are two bytes each).
+    let page = "\u{feff}<p>naïve café</p>".as_bytes();
+    let h = serving(
+        limits(SchemePolicy::HttpAndHttps, 0),
+        ok_body("Content-Type: text/html\r\n", page),
+    );
+
+    let transfer = h.get(ORIGIN).await;
+
+    let text = extraction(&transfer);
+    assert_eq!(
+        (text.charset.label.as_str(), text.charset.source),
+        ("utf-8", CharsetSource::Bom),
+        "the byte-order mark decides"
+    );
+    assert_eq!(spans(text), [(6, 18, "naïve café")], "spans count the BOM");
+    assert_eq!(
+        &transfer.body()[6..18],
+        "naïve café".as_bytes(),
+        "the span slices the decoded body, BOM included"
+    );
+}
+
+#[tokio::test]
+async fn cookies_are_never_sent_or_recorded() {
+    let h = Harness::new(
+        limits(SchemePolicy::HttpAndHttps, 1),
+        ScriptedResolver::new(),
+    );
+    h.connector.route(
+        "8.8.8.8:80",
+        duplex(vec![
+            (
+                "/start",
+                raw(
+                    b"HTTP/1.1 302 Found\r\nSet-Cookie: session=hop-cookie-secret; Path=/\r\n\
+                      Location: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ),
+            ),
+            (
+                "/final",
+                ok_body(
+                    "Content-Type: text/plain\r\n\
+                     Set-Cookie: session=final-cookie-secret; HttpOnly\r\n\
+                     Content-Location: http://user:userinfo-secret@8.8.8.8/final\r\n",
+                    b"served",
+                ),
+            ),
+        ]),
+    );
+
+    let transfer = h.get("http://8.8.8.8/start").await;
+
+    assert_eq!(transfer.body(), b"served", "the redirect was followed");
+    let requests = h.connector.duplex_requests();
+    assert_eq!(requests.len(), 2, "one request per hop");
+    for seen in &requests {
+        assert_eq!(
+            seen.header_names(),
+            [
+                "host",
+                "user-agent",
+                "accept",
+                "accept-encoding",
+                "connection"
+            ],
+            "{}: no Cookie header, even after a hop set one",
+            seen.target()
+        );
+    }
+    let evidence = serde_json::to_string(transfer.envelope()).unwrap();
+    assert!(
+        !evidence.contains("cookie-secret") && !evidence.to_lowercase().contains("cookie"),
+        "no Set-Cookie value or header is recorded: {evidence}"
+    );
+    assert!(
+        !evidence.contains("userinfo-secret"),
+        "no userinfo is recorded: {evidence}"
+    );
+    for hop in transfer.envelope().hops() {
+        assert!(
+            hop.url().username().is_empty() && hop.url().password().is_none(),
+            "no hop URL carries userinfo: {}",
+            hop.url()
+        );
+    }
 }
