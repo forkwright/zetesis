@@ -27,8 +27,8 @@ fn day_window() -> SignedDuration {
 fn builders_construct_a_custom_budget_without_struct_literal() {
     // WHY(zetesis#47): BudgetConstraint is #[non_exhaustive], so a
     // downstream crate could not previously construct a custom budget at
-    // all -- free_only()/phase_zero_default() were the only reachable
-    // values. The with_* builders close that gap.
+    // all -- only the preset constructors were reachable. The with_*
+    // builders close that gap.
     let b = BudgetConstraint::free_only()
         .with_per_query_cap(1_000)
         .with_per_day_cap(2_000)

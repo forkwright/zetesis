@@ -1,24 +1,26 @@
 # Zetesis
 
-> Sovereign research substrate for free-first provider routing, cache, budget, citations, deep research, steelmanning, and briefings.
+> Sovereign research substrate for free-first provider routing, bounded static acquisition, budget enforcement, citations, deep inquiry, steelmanning, and briefings.
 
-Zetesis is in Phase 1 scaffold. The locked implementation shape is four crates: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
+Zetesis is pre-release. The implementation shape is four crates: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`. Most behavior is planned; the contract baseline separates what has landed from what has not.
 
 ## Surface
 
-The current Rust surface is the translated `sylloge` provider/result/budget API, re-exported by the `zetesis` facade. The future `zetesis` daemon/CLI will own process wiring and expose consumer adapter traits.
+The landed Rust surface is the `sylloge` provider, constraint, network-target, citation, result, cost, budget, and deep-research lifecycle types, re-exported by the `zetesis` facade. No provider adapter, HTTP client, cache, durable ledger, model binding, or daemon exists yet. Planned: bounded static acquisition with a versioned evidence envelope (zetesis#48), a durable identity-bound paid-spend ledger (zetesis#47), and deep inquiry through a consumer-granted model contract.
 
 ## Architecture
 
+- [docs/design/contract-baseline.md](docs/design/contract-baseline.md): public API inventory, contract ownership, identity and idempotency, evidence envelope v1, storage
+
 Structured LLM corpus:
-- [_llm/architecture.toml](_llm/architecture.toml): planned layers and crates
-- [_llm/current_state.toml](_llm/current_state.toml): phase, gates, and open threads
-- [_llm/decisions.toml](_llm/decisions.toml): accepted Phase 0 decisions
+- [_llm/architecture.toml](_llm/architecture.toml): landed and planned crate roles
+- [_llm/current_state.toml](_llm/current_state.toml): phase, recent changes, and open threads
+- [_llm/decisions.toml](_llm/decisions.toml): accepted design decisions
 - [_llm/glossary.toml](_llm/glossary.toml): zetesis vocabulary
 
 ## Agent Entry Points
 
 - [README.md](README.md): purpose and public boundaries
 - [CLAUDE.md](CLAUDE.md): repo conventions and design principles
-- [Cargo.toml](Cargo.toml): manifest for the locked four-crate workspace (`zetesis`, `sylloge`, `elenkhos`, `synopsis`); `sylloge` carries the landed provider/result/budget implementation, `elenkhos`/`synopsis` are reserved crate boundaries
-- `kanon/projects/zetesis/STATE.md`: canonical planning status
+- [AGENTS.md](AGENTS.md): agent entry points and local gate commands
+- [Cargo.toml](Cargo.toml): manifest for the four-crate workspace (`zetesis`, `sylloge`, `elenkhos`, `synopsis`); `sylloge` carries the landed implementation, `elenkhos`/`synopsis` are reserved crate boundaries

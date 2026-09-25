@@ -14,7 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use snafu::ensure;
 use url::{Host, Url};
 
-use crate::constraints::{SearchConstraints, matches_suffix};
+use crate::constraints::{DomainRule, SearchConstraints};
 use crate::error::{Result, TransientIoSnafu, UnsafeTargetSnafu};
 
 /// Schemes [`SearchConstraints::check_url`] permits. Every other scheme
@@ -156,9 +156,14 @@ impl SearchConstraints {
             .build());
         };
 
-        let addrs = match host {
-            Host::Ipv4(v4) => vec![IpAddr::V4(v4)],
-            Host::Ipv6(v6) => vec![IpAddr::V6(v6)],
+        // WHY: parse the caller's domain lists before any DNS I/O so an
+        // unusable entry fails closed without touching the network.
+        let denylist = parse_domain_rules("domain_denylist", self.domain_denylist.as_deref())?;
+        let allowlist = parse_domain_rules("domain_allowlist", self.domain_allowlist.as_deref())?;
+
+        let addrs = match &host {
+            Host::Ipv4(v4) => vec![IpAddr::V4(*v4)],
+            Host::Ipv6(v6) => vec![IpAddr::V6(*v6)],
             Host::Domain(name) => {
                 let port = url.port_or_known_default().unwrap_or(0);
                 resolver.resolve(name, port).map_err(|source| {
@@ -189,19 +194,18 @@ impl SearchConstraints {
             }
         }
 
-        let host_str = url.host_str().unwrap_or("");
-        if let Some(deny) = &self.domain_denylist {
+        if let Some(rules) = &denylist {
             ensure!(
-                !deny.iter().any(|suffix| matches_suffix(host_str, suffix)),
+                !rules.iter().any(|rule| rule.matches(&host)),
                 UnsafeTargetSnafu {
                     url: url.to_string(),
                     reason: "host matches the configured denylist",
                 }
             );
         }
-        if let Some(allow) = &self.domain_allowlist {
+        if let Some(rules) = &allowlist {
             ensure!(
-                allow.iter().any(|suffix| matches_suffix(host_str, suffix)),
+                rules.iter().any(|rule| rule.matches(&host)),
                 UnsafeTargetSnafu {
                     url: url.to_string(),
                     reason: "host does not match the configured allowlist",
@@ -214,6 +218,19 @@ impl SearchConstraints {
             addrs,
         })
     }
+}
+
+/// Parse an optional domain list into canonical rules (see
+/// [`DomainRule`]); `None` stays `None` (no constraint).
+fn parse_domain_rules(field: &str, entries: Option<&[String]>) -> Result<Option<Vec<DomainRule>>> {
+    entries
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| DomainRule::parse(field, entry))
+                .collect()
+        })
+        .transpose()
 }
 
 /// Resolves a host to its concrete address(es), for
@@ -372,11 +389,22 @@ fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
 /// [`Ipv6Addr::to_ipv4`] (not the narrower `to_ipv4_mapped`, which
 /// recognizes only the mapped form) unwraps both.
 fn is_blocked_address(addr: IpAddr) -> bool {
-    match addr {
+    match canonical_ip(addr) {
         IpAddr::V4(v4) => is_blocked_ipv4(v4),
-        IpAddr::V6(v6) => v6
-            .to_ipv4()
-            .map_or_else(|| is_blocked_ipv6(v6), is_blocked_ipv4),
+        IpAddr::V6(v6) => is_blocked_ipv6(v6),
+    }
+}
+
+/// The one canonical form of `addr` for every policy decision: an IPv6
+/// address that embeds an IPv4 address (the RFC 4291 IPv4-mapped
+/// `::ffff:a.b.c.d` and deprecated IPv4-compatible `::a.b.c.d` forms)
+/// becomes that IPv4 address; everything else is unchanged. Address
+/// classification and domain-list matching both use it, so no respelling
+/// of a host can pass one check and fail the other.
+pub(crate) fn canonical_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(v6) => v6.to_ipv4().map_or(IpAddr::V6(v6), IpAddr::V4),
+        v4 @ IpAddr::V4(_) => v4,
     }
 }
 
@@ -474,7 +502,7 @@ mod tests {
     #[test]
     fn check_url_accepts_trailing_root_dot_domain() {
         // Fully-qualified hosts with a trailing root dot are the same
-        // domain as their bare form -- see matches_suffix's own tests in
+        // domain as their bare form -- see the DomainRule tests in
         // constraints.rs for the string-matching half of this.
         let c = SearchConstraints::new(10, BudgetConstraint::default())
             .with_allowlist(vec![".edu".to_owned()]);

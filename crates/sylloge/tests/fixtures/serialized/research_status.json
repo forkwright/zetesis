@@ -1,0 +1,20 @@
+[
+  {
+    "state": "pending"
+  },
+  {
+    "state": "running",
+    "progress_pct": 40
+  },
+  {
+    "state": "ready",
+    "completed_at": "2026-04-22T10:00:00Z"
+  },
+  {
+    "state": "failed",
+    "message": "upstream unavailable"
+  },
+  {
+    "state": "cancelled"
+  }
+]

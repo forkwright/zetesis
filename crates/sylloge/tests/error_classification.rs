@@ -10,10 +10,10 @@
 
 use sylloge::{
     BudgetExceededSnafu, BudgetScope, DomainDeniedSnafu, Error, FatalCorruptionSnafu,
-    InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu,
-    ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
-    UnsupportedSnafu,
+    InvalidConstraintSnafu, InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu,
+    PermanentIoSnafu, ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu,
+    TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu,
+    UnsafeTargetSnafu, UnsupportedSnafu,
 };
 
 // WHY: kept as two functions, split along the transient/(permanent+fatal)
@@ -70,6 +70,11 @@ fn permanent_and_fatal_variants() -> Vec<Error> {
         }
         .build(),
         InvalidQuerySnafu {
+            reason: "m".to_owned(),
+        }
+        .build(),
+        InvalidConstraintSnafu {
+            field: "f".to_owned(),
             reason: "m".to_owned(),
         }
         .build(),
@@ -208,6 +213,7 @@ fn permanent_set_is_expected_members() {
         .map(|e| match e {
             Error::BudgetExceeded { .. } => "BudgetExceeded",
             Error::DomainDenied { .. } => "DomainDenied",
+            Error::InvalidConstraint { .. } => "InvalidConstraint",
             Error::InvalidQuery { .. } => "InvalidQuery",
             Error::MissingCitations { .. } => "MissingCitations",
             Error::OversizedPayload { .. } => "OversizedPayload",
@@ -225,6 +231,7 @@ fn permanent_set_is_expected_members() {
         [
             "BudgetExceeded",
             "DomainDenied",
+            "InvalidConstraint",
             "InvalidQuery",
             "MissingCitations",
             "OversizedPayload",

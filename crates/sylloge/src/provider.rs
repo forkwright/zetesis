@@ -1,9 +1,10 @@
 //! The top-level [`Provider`] async trait.
 //!
 //! Every free-quality API, paid API, and self-hosted endpoint in the
-//! fleet's research stack implements `Provider`. Phase 1b Kimi-dispatched
-//! agents will land six Tier 0 providers (Semantic Scholar, arXiv,
-//! `OpenAlex`, Crossref, `PubMed`, Wikipedia) against this trait.
+//! fleet's research stack implements `Provider`. The first cohort
+//! (Semantic Scholar, arXiv, Wikipedia) is Phase 03 work; further providers
+//! join only through the same conformance fixtures and a current endpoint
+//! policy.
 
 use std::future::Future;
 use std::pin::Pin;

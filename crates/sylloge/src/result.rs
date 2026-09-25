@@ -40,7 +40,8 @@ pub struct ResultHit {
     /// Full extracted text, if the provider (or crawler) resolved one.
     /// Kept `Option` because Tier 0 academic providers return abstracts,
     /// not bodies. Capped at [`ResultHit::MAX_FULL_TEXT_BYTES`] by
-    /// [`ResultHit::with_full_text`].
+    /// [`ResultHit::with_full_text`] and at the deserialization boundary.
+    #[serde(deserialize_with = "full_text_within_cap")]
     pub full_text: Option<String>,
 
     /// Provenance records — must have at least one entry (enforced by
@@ -162,6 +163,28 @@ impl ResultHit {
     pub fn has_strong_citation(&self) -> bool {
         self.citations.iter().any(Citation::is_strong)
     }
+}
+
+/// Reject a decoded `full_text` longer than
+/// [`ResultHit::MAX_FULL_TEXT_BYTES`].
+///
+/// WHY: `full_text` is a pub field, so serde is a second construction path;
+/// without this a provider or persisted payload carries an unbounded body
+/// past the cap [`ResultHit::with_full_text`] enforces.
+fn full_text_within_cap<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?;
+    if let Some(text) = &text
+        && text.len() > ResultHit::MAX_FULL_TEXT_BYTES
+    {
+        return Err(serde::de::Error::invalid_length(
+            text.len(),
+            &"full_text within ResultHit::MAX_FULL_TEXT_BYTES",
+        ));
+    }
+    Ok(text)
 }
 
 /// Reject an empty citations vector at the deserialization boundary.

@@ -75,8 +75,9 @@ impl SourceKind {
     /// Whether consumers should treat this kind as authoritative without
     /// further corroboration.
     ///
-    /// Peer-reviewed, legal, and filing sources are authoritative. Web,
-    /// social, and preprint sources are not.
+    /// Journal, legal, filing, and patent sources are authoritative. Web,
+    /// wiki, social, news, preprint, code, dataset, and book sources are
+    /// not.
     #[must_use]
     pub const fn is_authoritative(self) -> bool {
         matches!(
