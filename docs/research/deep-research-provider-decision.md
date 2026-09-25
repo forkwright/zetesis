@@ -15,13 +15,13 @@ nodes:
 5. `finalize_summary`
 
 The loop runs against `sylloge::DeepResearch`'s task lifecycle:
-`submit -> poll -> fetch`. The Phase 1 scaffold already exposes that trait; the
-backend now has an in-memory `LocalDeepResearch` task lifecycle scaffold. It
-now also has an offline fixture layer that exercises the five-node loop against
-deterministic query-generation, source-retrieval, synthesis, reflection, and
-finalization seams. It still needs real local LLM binding, search configuration,
-network-backed DuckDuckGo/SearXNG integration, and endpoint-backed integration
-tests.
+`submit -> poll -> fetch`, with `cancel` as the alternative to `fetch`. The
+trait is landed. `LocalDeepResearch` has an in-memory task lifecycle and an
+offline fixture layer that exercises the five-node loop against deterministic
+query-generation, source-retrieval, synthesis, reflection, and finalization
+seams. It still needs model binding through the consumer-granted model
+contract, search through Zetesis providers, durable task identity, and
+endpoint-backed integration tests.
 
 ## Source evidence
 
@@ -35,10 +35,13 @@ Evidence was checked against upstream source snapshots on 2026-05-25.
 
 ## Implementation notes
 
-- Default inference target: logismos-compatible OpenAI endpoint, initially
-  expected at `http://127.0.0.1:8000/v1`.
-- Default search target: DuckDuckGo. SearXNG is the preferred operator-hosted
-  override.
+- Model binding follows the consumer-granted model contract defined in
+  Phase 05. Logismos owns model execution; Zetesis does not assume a host,
+  port, or endpoint, and a missing or refused grant fails the task rather than
+  falling back to another backend.
+- Search goes through Zetesis providers behind the existing
+  `SourceRetriever` seam. SearXNG is used only as an explicitly registered
+  endpoint, never as an implicit default.
 - `gpt-researcher` is not the backend contract. Its useful takeable is the
   `vllm_openai` adapter convention; its retriever registry is still a static
   `VALID_RETRIEVERS` list, so custom retrievers require patching or an interim
@@ -52,9 +55,19 @@ Evidence was checked against upstream source snapshots on 2026-05-25.
 
 The remaining non-fixture `LocalDeepResearch` implementation should include:
 
-- real OpenAI-compatible local LLM binding for query generation, summarization,
-  reflection, and finalization;
-- DuckDuckGo/SearXNG search client integration behind the existing offline seams;
+- model binding through the consumer-granted model contract for query
+  generation, summarization, reflection, and finalization;
+- search through Zetesis providers behind the existing offline seams;
+- durable task identity with a consumer-supplied idempotency key, and the
+  iteration, source, and token resource dimensions (see
+  [the contract baseline](../design/contract-baseline.md));
 - endpoint-backed assertions that every final result carries citations,
   provenance, and budget accounting;
 - timeout, cancellation, and retry behavior for non-fixture execution.
+
+## Revision note
+
+2026-09-25: the original implementation notes named a default local inference
+endpoint and a default search engine. Those host and endpoint instructions are
+retired in favor of the consumer-granted model contract and registered search
+providers. The decision, source evidence, and rationale above are unchanged.

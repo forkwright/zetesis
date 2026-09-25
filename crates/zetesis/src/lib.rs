@@ -6,16 +6,16 @@ pub use elenkhos as steelman;
 pub use sylloge::{
     BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation, CostTracking, Crawler,
     DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, Error, ErrorClass,
-    FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy, InvalidQuerySnafu,
-    LocalDeepResearch, LocalTargetAuthorization, MissingCitationsSnafu, OfflineFixture,
-    OversizedPayloadSnafu, PageContent, PermanentIoSnafu, ProvenanceEntry, Provider,
-    ProviderFailureSnafu, ProviderId, ProviderSpend, ProviderTier, PublicationPrecision,
-    PublicationProvenance, PublicationTime, PublicationTimeCapability, QueryGenerator, QueryShape,
-    QuotaExhaustedSnafu, RateLimitedSnafu, ResearchResult, ResearchStatus, Resolver, Result,
-    ResultHit, SearchConstraints, SourceKind, SourceRetriever, SpendEvent, SpendLedger,
-    Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu,
-    TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
-    evaluate_freshness,
+    FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy,
+    InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization,
+    MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu, PageContent, PermanentIoSnafu,
+    ProvenanceEntry, Provider, ProviderFailureSnafu, ProviderId, ProviderSpend, ProviderTier,
+    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
+    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimitedSnafu, ResearchResult,
+    ResearchStatus, Resolver, Result, ResultHit, SearchConstraints, SourceKind, SourceRetriever,
+    SpendEvent, SpendLedger, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu,
+    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
+    UnsupportedSnafu, ValidatedTarget, evaluate_freshness,
 };
 pub use synopsis as briefing;
 

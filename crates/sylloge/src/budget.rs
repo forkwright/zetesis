@@ -24,7 +24,7 @@
 //! window between "checked" and "recorded" for a caller using it correctly.
 
 use jiff::{SignedDuration, Timestamp};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::cost::CostTracking;
 use crate::error::{BudgetExceededSnafu, Result};
@@ -50,7 +50,12 @@ pub struct SpendEvent {
 /// - timestamped events — feed the rolling 24-hour
 ///   [`BudgetConstraint::per_day_cap_micro_cents`] window and may be pruned
 ///   once they leave it ([`SpendLedger::prune_expired`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deserialization enforces what [`SpendLedger::record`] guarantees: no
+/// zero-spend events, and a lifetime total no smaller than the events
+/// still held (pruning removes events, never lifetime spend). A decoded
+/// ledger that violates either would under-report spend to a cap.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SpendLedger {
     lifetime_paid_micro_cents: u64,
     events: Vec<SpendEvent>,
@@ -65,7 +70,7 @@ impl SpendLedger {
 
     /// Record a paid spend of `paid_micro_cents` at `at`. Zero-spend
     /// records are ignored — free-tier usage is tracked in
-    /// [`CostTracking::free_tier_units`], not here.
+    /// [`crate::ProviderSpend::free_tier_units`], not here.
     pub fn record(&mut self, at: Timestamp, paid_micro_cents: u64) {
         if paid_micro_cents == 0 {
             return;
@@ -139,6 +144,41 @@ impl SpendLedger {
     }
 }
 
+#[derive(Deserialize)]
+struct SpendLedgerWire {
+    lifetime_paid_micro_cents: u64,
+    events: Vec<SpendEvent>,
+}
+
+impl<'de> Deserialize<'de> for SpendLedger {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SpendLedgerWire::deserialize(deserializer)?;
+        if wire.events.iter().any(|e| e.paid_micro_cents == 0) {
+            return Err(serde::de::Error::custom(
+                "spend ledger holds a zero-spend event, which recording never produces",
+            ));
+        }
+        let held = wire
+            .events
+            .iter()
+            .map(|e| e.paid_micro_cents)
+            .fold(0_u64, u64::saturating_add);
+        if wire.lifetime_paid_micro_cents < held {
+            return Err(serde::de::Error::custom(format!(
+                "spend ledger lifetime total {} is below the {held} micro-cents its events hold",
+                wire.lifetime_paid_micro_cents
+            )));
+        }
+        Ok(Self {
+            lifetime_paid_micro_cents: wire.lifetime_paid_micro_cents,
+            events: wire.events,
+        })
+    }
+}
+
 /// Start of the rolling 24-hour window ending at `now`.
 fn day_window_start(now: Timestamp) -> Timestamp {
     // WHY: saturate at Timestamp::MIN instead of erroring — a window that
@@ -193,9 +233,11 @@ pub enum BudgetScope {
 ///   the calling agent (typically set per-deployment, not per-call).
 ///
 /// Constructing a custom [`BudgetConstraint`] outside this crate: the
-/// type is `#[non_exhaustive]`, so use [`BudgetConstraint::free_only`] or
-/// [`BudgetConstraint::phase_zero_default`] as a base and the `with_*`
-/// builders to adjust individual ceilings.
+/// type is `#[non_exhaustive]`, so start from
+/// [`BudgetConstraint::free_only`] and adjust individual ceilings with the
+/// `with_*` builders. The crate ships no paid default: numeric ceilings are
+/// consumer policy that needs measured demand, and paid routing stays
+/// disabled until durable budget enforcement exists (zetesis#47).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BudgetConstraint {
@@ -233,26 +275,6 @@ impl BudgetConstraint {
             per_fleet_day_cap_micro_cents: 0,
             per_agent_cap_micro_cents: 0,
             allow_paid_tier: false,
-        }
-    }
-
-    /// Default-ish permissive budget: paid tier allowed with a $0.05 per-query
-    /// cap, $5/day soft cap, $20 lifetime cap. Matches the Phase 0 initial
-    /// proposal in `projects/zetesis/phases/00-spec/PLAN.md` (REQ-00-04).
-    /// No fleet-day cap by default -- set one explicitly via
-    /// [`BudgetConstraint::with_per_fleet_day_cap`] once a fleet-wide
-    /// ledger is wired up.
-    #[must_use]
-    pub const fn phase_zero_default() -> Self {
-        Self {
-            // $0.05 = 500_000 micro-cents
-            per_query_cap_micro_cents: 500_000,
-            // $5.00 = 50_000_000 micro-cents
-            per_day_cap_micro_cents: 50_000_000,
-            per_fleet_day_cap_micro_cents: 0,
-            // $20.00 = 200_000_000 micro-cents
-            per_agent_cap_micro_cents: 200_000_000,
-            allow_paid_tier: true,
         }
     }
 
@@ -448,8 +470,7 @@ impl BudgetConstraint {
 
 impl Default for BudgetConstraint {
     /// Default is [`BudgetConstraint::free_only`] — safest default.
-    /// Opt-in to paid spend explicitly via [`BudgetConstraint::phase_zero_default`]
-    /// or by constructing the struct directly.
+    /// Opt in to paid spend explicitly through the `with_*` builders.
     fn default() -> Self {
         Self::free_only()
     }
@@ -468,6 +489,16 @@ mod tests {
         ts("2026-07-01T00:00:00Z")
     }
 
+    /// A paid-tier budget with query, day, and lifetime ceilings set. The
+    /// values are test fixtures, not policy.
+    fn paid_budget() -> BudgetConstraint {
+        BudgetConstraint::free_only()
+            .with_per_query_cap(500_000)
+            .with_per_day_cap(50_000_000)
+            .with_per_agent_cap(200_000_000)
+            .with_paid_tier_allowed(true)
+    }
+
     #[test]
     fn default_is_free_only() {
         let b = BudgetConstraint::default();
@@ -483,21 +514,21 @@ mod tests {
     }
 
     #[test]
-    fn phase_zero_default_permits_small_spend() {
-        let b = BudgetConstraint::phase_zero_default();
+    fn paid_budget_permits_spend_under_every_ceiling() {
+        let b = paid_budget();
         assert!(b.permits(100_000, &SpendLedger::new(), t0()));
     }
 
     #[test]
     fn per_query_cap_blocks_large_spend() {
-        let b = BudgetConstraint::phase_zero_default();
-        // $1.00 single call exceeds the $0.05 per-query cap.
+        let b = paid_budget();
+        // A call above the per-query ceiling is refused on its own.
         assert!(!b.permits(10_000_000, &SpendLedger::new(), t0()));
     }
 
     #[test]
     fn per_day_cap_blocks_within_window() {
-        let b = BudgetConstraint::phase_zero_default();
+        let b = paid_budget();
         let mut ledger = SpendLedger::new();
         ledger.record(t0(), b.per_day_cap_micro_cents);
         assert!(!b.permits(1, &ledger, t0()));
@@ -558,7 +589,7 @@ mod tests {
             allow_paid_tier: true,
         };
         let mut ledger = SpendLedger::new();
-        // Four separate days of $5 spend reach the $20 lifetime cap.
+        // Four separate days of day-cap spend reach the lifetime cap.
         ledger.record(ts("2026-07-01T00:00:00Z"), 50_000_000);
         ledger.record(ts("2026-07-03T00:00:00Z"), 50_000_000);
         ledger.record(ts("2026-07-05T00:00:00Z"), 50_000_000);
@@ -649,7 +680,7 @@ mod tests {
 
     #[test]
     fn budget_serde_round_trip() {
-        let b = BudgetConstraint::phase_zero_default();
+        let b = paid_budget();
         let json = serde_json::to_string(&b).unwrap();
         let back: BudgetConstraint = serde_json::from_str(&json).unwrap();
         assert_eq!(back, b);

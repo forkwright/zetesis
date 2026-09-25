@@ -61,10 +61,10 @@ pub use crawler::Crawler;
 pub use deep::DeepResearch;
 pub use error::{
     BudgetExceededSnafu, DomainDeniedSnafu, Error, ErrorClass, FatalCorruptionSnafu,
-    InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu, PermanentIoSnafu,
-    ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
-    UnsupportedSnafu,
+    InvalidConstraintSnafu, InvalidQuerySnafu, MissingCitationsSnafu, OversizedPayloadSnafu,
+    PermanentIoSnafu, ProviderFailureSnafu, QuotaExhaustedSnafu, RateLimitedSnafu, Result,
+    TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu,
+    UnsafeTargetSnafu, UnsupportedSnafu,
 };
 pub use fixture::{OfflineFixture, QueryGenerator, SourceRetriever, Synthesizer};
 pub use freshness::{

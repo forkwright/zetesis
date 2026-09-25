@@ -5,35 +5,36 @@ generated = false
 source_docs = [
   "README.md",
   "CLAUDE.md",
-  "kanon/projects/zetesis/STATE.md",
+  "docs/design/contract-baseline.md",
+  "docs/research/deep-research-provider-decision.md",
 ]
 
 [decisions]
-summary = "Locked Phase 0 decisions for the zetesis research substrate."
+summary = "Accepted design decisions for the zetesis research substrate."
 
 [[decision]]
 id = "D-colocation-heavy"
 title = "Own consumer-agnostic research substrate mechanisms"
 status = "accepted"
 context = "Aletheia, dioptron, and akroasis all need research/search behavior with shared policy boundaries."
-decision = "Zetesis owns provider aggregation, routing, cache, budget, orchestration, steelmanning, briefings, and fact emission framework."
-consequences = "Consumers supply policy through adapter traits instead of each building research stacks."
+decision = "Zetesis owns provider aggregation, routing, bounded static acquisition, cache, budget, orchestration, steelmanning, briefings, and candidate fact emission."
+consequences = "Consumers supply policy through adapter traits and values instead of each building research stacks. Consumers keep knowledge admission: a zetesis emission is a candidate until the consumer confirms it."
 
 [[decision]]
 id = "D-four-crates"
 title = "Use four-crate decomposition"
 status = "accepted"
 context = "Prior PR shape violated naming/decomposition rules."
-decision = "Use zetesis, sylloge, elenkhos, and synopsis as the planned crate set."
-consequences = "Implementation starts from a clean four-crate workspace after Phase 0."
+decision = "Use zetesis, sylloge, elenkhos, and synopsis as the crate set."
+consequences = "The workspace carries exactly these four crates; elenkhos and synopsis hold their boundary as marker types until their behavior is scheduled."
 
 [[decision]]
 id = "D-free-first"
 title = "Tier 0 free providers by default"
 status = "accepted"
 context = "Vendor search APIs are paid, opaque, and compound costs at agent scale."
-decision = "Route first through Semantic Scholar, arXiv, Wikipedia, Crossref, PubMed, OpenAlex list-mode, and SearXNG."
-consequences = "Paid providers are budget-gated fallbacks, not defaults."
+decision = "Route first through Semantic Scholar, arXiv, Wikipedia, Crossref, PubMed, and OpenAlex list-mode, plus SearXNG when an operator registers an endpoint explicitly."
+consequences = "Paid providers are disabled until explicitly configured and a reservation authorizes the spend. A Tier-0 miss never enables paid use, and there is no automatic paid fallback."
 
 [[decision]]
 id = "D-cited-structured"
@@ -45,16 +46,32 @@ consequences = "Consumers can ingest results into knowledge systems without opaq
 
 [[decision]]
 id = "D-logismos-default"
-title = "Use local inference for deep research when ready"
+title = "Execute deep-inquiry models through Logismos under a consumer-granted model contract"
 status = "accepted"
-context = "Deep-research loops can become expensive against hosted frontier APIs."
-decision = "Target logismos as the Tier 2 inference backend, with interim local fallback if needed."
-consequences = "Research orchestration aligns with fleet sovereignty and budget goals."
+context = "Deep-research loops can become expensive against hosted frontier APIs, and host resources belong to other owners."
+decision = "Deep inquiry calls models only through a model contract the consumer grants. Logismos owns model execution. There is no implicit fallback to another backend."
+consequences = "A missing or refused model grant fails the task instead of routing elsewhere. Zetesis never selects a host or switches host modes; Tropos owns host modes."
 
 [[decision]]
 id = "D-phase05-local-deep-researcher"
 title = "Vendor the local-deep-researcher loop pattern"
 status = "accepted"
 context = "Phase 05 compared local-deep-researcher, gpt-researcher, open_deep_research, and OpenManus for the deep-research backend contract."
-decision = "Implement LocalDeepResearch as a Rust port of local-deep-researcher's generate_query, web_research, summarize_sources, reflect_on_summary, and finalize_summary loop against the sylloge::DeepResearch submit/poll/fetch lifecycle. Reuse gpt-researcher's vllm_openai adapter convention for logismos-compatible inference."
+decision = "Implement LocalDeepResearch as a Rust port of local-deep-researcher's generate_query, web_research, summarize_sources, reflect_on_summary, and finalize_summary loop against the sylloge::DeepResearch submit/poll/fetch/cancel lifecycle. Model binding follows the consumer-granted model contract; gpt-researcher's vllm_openai adapter shape is prior art for that binding, not an endpoint default."
 consequences = "Do not adopt open_deep_research as the default contract because its current search API enum is limited to Anthropic, OpenAI, Tavily, and none, with Tavily and OpenAI models as defaults. See docs/research/deep-research-provider-decision.md for source evidence."
+
+[[decision]]
+id = "D-static-acquisition-owner"
+title = "Own anonymous bounded static acquisition in zetesis"
+status = "accepted"
+context = "Dioptron accepted a boundary in which a consumer-local static fetch stack would duplicate target, redirect, HTTP, decoding, extraction, and evidence behavior."
+decision = "Zetesis owns the consumer-neutral static acquisition state machine: per-hop target validation, one-hop private transport, bounded transfer and decoding, static extraction, and a versioned evidence envelope with a fingerprint. External extractors such as Firecrawl or trafilatura are not the implementation owner."
+consequences = "The Crawler trait and PageContent are retired when StaticAcquirer lands. Consumers store the envelope verbatim and keep sessions, rendering, scripted browsing, authority, and body custody."
+
+[[decision]]
+id = "D-no-consumer-cycle"
+title = "Zetesis depends on no consumer"
+status = "accepted"
+context = "Consumers need a pinned, reviewable producer; a Cargo cycle between producer and consumers would block both."
+decision = "Zetesis takes no Cargo dependency on any consumer. Consumers pin a merged zetesis commit SHA. Logismos, Tropos, and Kanon are reached through service or registration contracts."
+consequences = "Consumer policy enters through traits and values zetesis defines and the consumer implements at call time, such as Resolver and, when it lands, Connector."

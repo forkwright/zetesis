@@ -1,0 +1,63 @@
+{
+  "query": "attention is all you need",
+  "shape": "academic_literature",
+  "hits": [
+    {
+      "title": "Attention Is All You Need",
+      "snippet": "The dominant sequence transduction models",
+      "url": "https://example.org/papers/1706.03762",
+      "full_text": null,
+      "citations": [
+        {
+          "source_url": "https://example.org/papers/1706.03762",
+          "accessed_at": "2026-04-22T10:00:00Z",
+          "published_at": {
+            "state": "known",
+            "at": "2017-06-12T00:00:00Z",
+            "precision": "date_only",
+            "provenance": "provider_declared"
+          },
+          "source_kind": "preprint",
+          "confidence": 0.95,
+          "content_type": "application/pdf"
+        }
+      ],
+      "score": 0.9,
+      "metadata": {
+        "arxiv_id": "1706.03762",
+        "year": 2017
+      },
+      "freshness": {
+        "accepted": true,
+        "policy": "strict",
+        "basis": "no_window_configured"
+      }
+    }
+  ],
+  "provenance": [
+    {
+      "provider_id": "arxiv",
+      "citation": {
+        "source_url": "https://example.org/papers/1706.03762",
+        "accessed_at": "2026-04-22T10:00:00Z",
+        "published_at": {
+          "state": "unknown"
+        },
+        "source_kind": "preprint",
+        "confidence": 1.0,
+        "content_type": null
+      }
+    }
+  ],
+  "cost_spent": {
+    "by_provider": {
+      "arxiv": {
+        "provider_id": "arxiv",
+        "paid_micro_cents": 0,
+        "free_tier_units": 1,
+        "request_count": 1
+      }
+    }
+  },
+  "cache_key": "fixture-cache-key"
+}

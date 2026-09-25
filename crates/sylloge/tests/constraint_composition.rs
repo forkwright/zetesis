@@ -20,6 +20,16 @@ use sylloge::{
     PublicationProvenance, PublicationTime, Resolver, SearchConstraints, SourceKind, SpendLedger,
 };
 
+/// A paid-tier budget with query, day, and lifetime ceilings set. The
+/// values are test fixtures, not policy.
+fn paid_budget() -> BudgetConstraint {
+    BudgetConstraint::free_only()
+        .with_per_query_cap(500_000)
+        .with_per_day_cap(50_000_000)
+        .with_per_agent_cap(200_000_000)
+        .with_paid_tier_allowed(true)
+}
+
 fn now() -> Timestamp {
     "2026-07-01T00:00:00Z".parse().unwrap()
 }
@@ -61,7 +71,7 @@ fn default_constraints_reject_local_target() {
 
 #[test]
 fn compose_all_builders() {
-    let c = SearchConstraints::new(20, BudgetConstraint::phase_zero_default())
+    let c = SearchConstraints::new(20, paid_budget())
         .with_freshness(Duration::from_secs(86_400))
         .with_language("en-US".parse().unwrap())
         .with_allowlist(vec![".edu".to_owned(), ".gov".to_owned()])
@@ -98,16 +108,16 @@ fn budget_composition_free_only_rejects_paid_tier() {
 }
 
 #[test]
-fn budget_composition_phase_zero_blocks_expensive_call() {
-    let c = SearchConstraints::new(10, BudgetConstraint::phase_zero_default());
-    // $0.05 = 500_000 micro-cents per query cap.
+fn budget_composition_blocks_call_above_query_cap() {
+    let c = SearchConstraints::new(10, paid_budget());
+    // The fixture's per-query ceiling is 500_000 micro-cents.
     assert!(c.budget.permits(500_000, &SpendLedger::new(), now()));
     assert!(!c.budget.permits(500_001, &SpendLedger::new(), now()));
 }
 
 #[test]
 fn budget_composition_ledger_drives_cumulative_caps() {
-    let c = SearchConstraints::new(10, BudgetConstraint::phase_zero_default());
+    let c = SearchConstraints::new(10, paid_budget());
     let mut full = SpendLedger::new();
     full.record(now(), c.budget.per_day_cap_micro_cents);
     assert!(!c.budget.permits(1, &full, now()));
@@ -122,7 +132,7 @@ fn serialize_and_deserialize_composed_constraints_round_trip() {
     // WHY: the router persists a constraint digest into cache keys; if
     // serde round-trip isn't stable across builder composition, two
     // semantically-identical constraints could key differently.
-    let c = SearchConstraints::new(10, BudgetConstraint::phase_zero_default())
+    let c = SearchConstraints::new(10, paid_budget())
         .with_freshness(Duration::from_secs(3_600))
         .with_allowlist(vec![".edu".to_owned()]);
     let json = serde_json::to_string(&c).unwrap();

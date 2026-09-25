@@ -12,18 +12,20 @@
 //! lifecycle. [`PageContent`] is the normalized output of a single
 //! [`super::Crawler::fetch_page`] call.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use language_tags::LanguageTag;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::ensure;
-use url::Url;
+use url::{Host, Url};
 
 use crate::BudgetConstraint;
 use crate::citation::Citation;
-use crate::error::{OversizedPayloadSnafu, Result};
+use crate::error::{InvalidConstraintSnafu, OversizedPayloadSnafu, Result};
 use crate::freshness::{self, FreshnessBasis, FreshnessDecision, FreshnessPolicy};
+use crate::net_policy::canonical_ip;
 
 /// Per-call constraints supplied by the caller.
 ///
@@ -57,15 +59,19 @@ pub struct SearchConstraints {
     /// don't support language filtering ignore this field.
     pub language: Option<LanguageTag>,
 
-    /// If set, only hits from these domains are acceptable. Each entry is
-    /// a suffix match (e.g. `.edu` matches `mit.edu` and `foo.mit.edu`).
-    /// Matching is ASCII case-insensitive (RFC 4343) and ignores a
-    /// trailing root dot on either side.
+    /// If set, only hits from these domains are acceptable. A domain entry
+    /// is a suffix match (e.g. `.edu` matches `mit.edu` and `foo.mit.edu`);
+    /// an IP-address entry matches only that address, in any spelling.
+    /// Entries are canonicalized with the same host parser URLs go through
+    /// (case-insensitive per RFC 4343, internationalized names as punycode,
+    /// optional leading or trailing dot), and an entry that names no host
+    /// (empty, a wildcard, a URL, a host with a port) makes
+    /// [`SearchConstraints::check_url`] fail with
+    /// [`crate::Error::InvalidConstraint`] instead of matching nothing.
     pub domain_allowlist: Option<Vec<String>>,
 
-    /// Domains to reject outright. Each entry is a suffix match with the
-    /// same case-insensitive, trailing-dot-tolerant semantics as
-    /// [`SearchConstraints::domain_allowlist`].
+    /// Domains to reject outright, with the same entry semantics and
+    /// fail-closed validation as [`SearchConstraints::domain_allowlist`].
     pub domain_denylist: Option<Vec<String>>,
 
     /// Budget ceiling for this call. See [`BudgetConstraint`] for the
@@ -160,38 +166,84 @@ impl Default for SearchConstraints {
     }
 }
 
-/// Domain-suffix matcher backing [`SearchConstraints::domain_allowlist`] /
-/// [`SearchConstraints::domain_denylist`], and (from `crate::net_policy`)
-/// [`SearchConstraints::check_url_with`]'s domain-policy step.
-pub(crate) fn matches_suffix(host: &str, suffix: &str) -> bool {
-    // WHY: domain names are case-insensitive (RFC 4343) and a trailing
-    // root dot is semantically empty, so both sides are normalized before
-    // comparison — otherwise a caller-supplied ".EDU" or "Tracker.Example"
-    // entry would silently never match the always-lowercase host the url
-    // crate produces. A leading dot on the suffix is stripped (".edu" and
-    // "edu" both mean: any host equal to or ending in ".edu").
-    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
-    let suffix = suffix.strip_prefix('.').unwrap_or(suffix);
-    let suffix = suffix
-        .strip_suffix('.')
-        .unwrap_or(suffix)
-        .to_ascii_lowercase();
-    if suffix.is_empty() {
-        return false;
+/// One canonical entry of [`SearchConstraints::domain_allowlist`] or
+/// [`SearchConstraints::domain_denylist`].
+///
+/// Entries are parsed with the same WHATWG host parser the `url` crate
+/// applies to every request URL, so both sides of a comparison are in one
+/// canonical form: ASCII-lowercase, internationalized names in punycode,
+/// alternate IPv4 spellings resolved, and IPv4-embedding IPv6 addresses
+/// unwrapped. An entry that cannot name a host is an
+/// [`crate::Error::InvalidConstraint`], never a silent "matches nothing":
+/// that silence is what let a Unicode, wildcard, or URL-shaped denylist
+/// entry admit the very host it was written to block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DomainRule {
+    /// A domain name; matches itself and every subdomain.
+    Suffix(String),
+    /// An IP address; matches only that address, in any spelling.
+    Address(IpAddr),
+}
+
+impl DomainRule {
+    /// Parse one caller-supplied entry from constraint `field`.
+    ///
+    /// A leading dot (".edu") and a trailing root dot are optional and mean
+    /// the same as the bare name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::InvalidConstraint`] when the entry is empty,
+    /// contains a wildcard, has an empty label, or is not a host name or IP
+    /// address (for example a URL or a host with a port).
+    pub(crate) fn parse(field: &str, entry: &str) -> Result<Self> {
+        let invalid = |reason: String| {
+            InvalidConstraintSnafu {
+                field: field.to_owned(),
+                reason: format!("entry {entry:?}: {reason}"),
+            }
+            .build()
+        };
+        let bare = entry.strip_prefix('.').unwrap_or(entry);
+        let bare = bare.strip_suffix('.').unwrap_or(bare);
+        if bare.is_empty() {
+            return Err(invalid("names no host".to_owned()));
+        }
+        if bare.contains('*') {
+            return Err(invalid(
+                "wildcards are not supported; an entry already matches every subdomain".to_owned(),
+            ));
+        }
+        if let Ok(ip) = bare.parse::<IpAddr>() {
+            return Ok(Self::Address(canonical_ip(ip)));
+        }
+        match Host::parse(bare) {
+            Ok(Host::Domain(domain)) => {
+                if domain.split('.').any(str::is_empty) {
+                    return Err(invalid("contains an empty label".to_owned()));
+                }
+                Ok(Self::Suffix(domain))
+            }
+            Ok(Host::Ipv4(v4)) => Ok(Self::Address(IpAddr::V4(v4))),
+            Ok(Host::Ipv6(v6)) => Ok(Self::Address(canonical_ip(IpAddr::V6(v6)))),
+            Err(e) => Err(invalid(format!("not a host name or IP address ({e})"))),
+        }
     }
-    if host == suffix {
-        return true;
-    }
-    let Some(prefix_len) = host.len().checked_sub(suffix.len()) else {
-        return false;
-    };
-    if prefix_len == 0 {
-        // Length-equal was caught above; here host is shorter than suffix.
-        return false;
-    }
-    match host.get(..prefix_len) {
-        Some(prefix) => prefix.ends_with('.') && host.ends_with(suffix.as_str()),
-        None => false,
+
+    /// Whether this rule matches the canonical `host` of a parsed URL.
+    pub(crate) fn matches(&self, host: &Host<&str>) -> bool {
+        match (self, host) {
+            (Self::Suffix(suffix), Host::Domain(name)) => {
+                let name = name.strip_suffix('.').unwrap_or(name);
+                name == suffix
+                    || name
+                        .strip_suffix(suffix.as_str())
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+            (Self::Address(rule), Host::Ipv4(v4)) => *rule == IpAddr::V4(*v4),
+            (Self::Address(rule), Host::Ipv6(v6)) => *rule == canonical_ip(IpAddr::V6(*v6)),
+            _ => false,
+        }
     }
 }
 
@@ -277,7 +329,9 @@ pub enum ResearchStatus {
     Pending,
     /// Task is executing. Optional progress percent `0..=100`.
     Running {
-        /// Optional progress percentage (clamped to 0..=100 on construction).
+        /// Optional progress percentage (clamped to 0..=100 on construction;
+        /// a decoded value above 100 is rejected).
+        #[serde(deserialize_with = "percent_at_most_100")]
         progress_pct: Option<u8>,
     },
     /// Task finished successfully. Fetch the result via
@@ -332,6 +386,26 @@ impl ResearchStatus {
     pub fn running(progress_pct: Option<u8>) -> Self {
         let progress_pct = progress_pct.map(|p| p.min(100));
         Self::Running { progress_pct }
+    }
+}
+
+/// Reject a decoded progress percentage [`ResearchStatus::running`] could
+/// never produce.
+///
+/// WHY: `ResearchStatus` is a pub enum, so serde is a second construction
+/// path; without this a persisted or backend-supplied status could carry
+/// `progress_pct: 250` past the documented 0..=100 invariant.
+fn percent_at_most_100<'de, D>(deserializer: D) -> std::result::Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<u8>::deserialize(deserializer)?;
+    match value {
+        Some(pct) if pct > 100 => Err(serde::de::Error::invalid_value(
+            serde::de::Unexpected::Unsigned(u64::from(pct)),
+            &"a percentage in 0..=100",
+        )),
+        _ => Ok(value),
     }
 }
 
@@ -554,11 +628,16 @@ mod tests {
 
     #[test]
     fn builders_compose() {
-        let c = SearchConstraints::new(25, BudgetConstraint::phase_zero_default())
-            .with_freshness(Duration::from_secs(86_400))
-            .with_language("en-US".parse().unwrap())
-            .with_allowlist(vec![".edu".to_owned()])
-            .with_denylist(vec!["spam.example".to_owned()]);
+        let c = SearchConstraints::new(
+            25,
+            BudgetConstraint::free_only()
+                .with_per_query_cap(500_000)
+                .with_paid_tier_allowed(true),
+        )
+        .with_freshness(Duration::from_secs(86_400))
+        .with_language("en-US".parse().unwrap())
+        .with_allowlist(vec![".edu".to_owned()])
+        .with_denylist(vec!["spam.example".to_owned()]);
         assert_eq!(c.max_results, 25);
         assert_eq!(c.freshness_window, Some(Duration::from_secs(86_400)));
         assert_eq!(c.language.as_ref().unwrap().as_str(), "en-US");
@@ -566,35 +645,119 @@ mod tests {
         assert_eq!(c.domain_denylist.as_ref().unwrap().len(), 1);
     }
 
-    #[test]
-    fn matches_suffix_is_case_insensitive() {
-        // WHY: domain names are case-insensitive (RFC 4343); the url
-        // crate always produces lowercase hosts, so a mixed-case entry
-        // that only matched byte-for-byte would silently never fire.
-        assert!(matches_suffix("mit.edu", ".EDU"));
-        assert!(matches_suffix("mit.edu", "MIT.EDU"));
-        assert!(matches_suffix("cs.mit.edu", "MIT.edu"));
-        assert!(!matches_suffix("badmit.edu", "MIT.EDU"));
+    fn rule(entry: &str) -> DomainRule {
+        DomainRule::parse("domain_allowlist", entry).unwrap()
+    }
+
+    fn domain(name: &str) -> Host<&str> {
+        Host::Domain(name)
     }
 
     #[test]
-    fn matches_suffix_tolerates_trailing_root_dot() {
+    fn domain_rule_is_case_insensitive() {
+        // WHY: domain names are case-insensitive (RFC 4343); the url
+        // crate always produces lowercase hosts, so a mixed-case entry
+        // that only matched byte-for-byte would silently never fire.
+        assert!(
+            rule(".EDU").matches(&domain("mit.edu")),
+            ".EDU matches mit.edu"
+        );
+        assert!(
+            rule("MIT.EDU").matches(&domain("mit.edu")),
+            "MIT.EDU matches itself"
+        );
+        assert!(
+            rule("MIT.edu").matches(&domain("cs.mit.edu")),
+            "subdomains match"
+        );
+        assert!(
+            !rule("MIT.EDU").matches(&domain("badmit.edu")),
+            "label boundary holds"
+        );
+    }
+
+    #[test]
+    fn domain_rule_tolerates_trailing_root_dot() {
         // Fully-qualified hosts with a trailing root dot are the same
         // domain; entries written FQDN-style must match too. See
         // `net_policy::tests::check_url_accepts_trailing_root_dot_domain`
         // for the `check_url_with` integration of this.
-        assert!(matches_suffix("mit.edu.", ".edu"));
-        assert!(matches_suffix("mit.edu", "edu."));
-        assert!(matches_suffix("mit.edu.", "mit.edu."));
+        assert!(
+            rule(".edu").matches(&domain("mit.edu.")),
+            "host root dot ignored"
+        );
+        assert!(
+            rule("edu.").matches(&domain("mit.edu")),
+            "entry root dot ignored"
+        );
+        assert!(
+            rule("mit.edu.").matches(&domain("mit.edu.")),
+            "both root dots ignored"
+        );
     }
 
     #[test]
-    fn matches_suffix_rejects_degenerate_entries() {
-        // "." and "" normalize to an empty suffix, which must never match
-        // (an empty suffix would otherwise allow every host).
-        assert!(!matches_suffix("mit.edu", "."));
-        assert!(!matches_suffix("mit.edu", ""));
-        assert!(!matches_suffix("mit.edu", ".."));
+    fn domain_rule_rejects_entries_that_name_no_host() {
+        // WHY: an entry that cannot match any host used to be accepted and
+        // then match nothing, which fails OPEN for a denylist.
+        for entry in [
+            "",
+            ".",
+            "..",
+            "..edu",
+            "a..b",
+            "*.example.org",
+            "https://example.org",
+            "example.org/path",
+            "example.org:443",
+            "two words.example",
+        ] {
+            let err = DomainRule::parse("domain_denylist", entry).unwrap_err();
+            assert!(
+                matches!(err, crate::Error::InvalidConstraint { .. }),
+                "{entry:?} must be an invalid constraint, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_rule_canonicalizes_internationalized_names() {
+        assert_eq!(
+            rule("Bücher.Example"),
+            DomainRule::Suffix("xn--bcher-kva.example".to_owned()),
+            "a Unicode entry canonicalizes to the punycode form URL hosts use"
+        );
+    }
+
+    #[test]
+    fn domain_rule_matches_ip_addresses_exactly_in_any_spelling() {
+        let r = rule("127.0.0.1");
+        assert!(
+            r.matches(&Host::Ipv4(std::net::Ipv4Addr::LOCALHOST)),
+            "the same address matches"
+        );
+        assert!(
+            r.matches(&Host::Ipv6("::ffff:127.0.0.1".parse().unwrap())),
+            "the IPv4-mapped spelling of the same address matches"
+        );
+        assert!(
+            !r.matches(&Host::Ipv4("127.0.0.2".parse().unwrap())),
+            "a different address does not match"
+        );
+        assert!(
+            !r.matches(&domain("127.0.0.1.example")),
+            "an address rule never suffix-matches a domain"
+        );
+        assert_eq!(
+            rule("0x7f.1"),
+            DomainRule::Address("127.0.0.1".parse().unwrap()),
+            "alternate IPv4 spellings canonicalize like URL hosts"
+        );
+        assert_eq!(
+            rule("::1"),
+            rule("[::1]"),
+            "bare and bracketed IPv6 entries are the same rule"
+        );
     }
 
     #[test]
@@ -807,10 +970,15 @@ mod tests {
 
     #[test]
     fn search_constraints_serde_round_trip() {
-        let c = SearchConstraints::new(5, BudgetConstraint::phase_zero_default())
-            .with_freshness(Duration::from_secs(3600))
-            .with_language("en".parse().unwrap())
-            .with_allowlist(vec!["example.org".to_owned()]);
+        let c = SearchConstraints::new(
+            5,
+            BudgetConstraint::free_only()
+                .with_per_query_cap(500_000)
+                .with_paid_tier_allowed(true),
+        )
+        .with_freshness(Duration::from_secs(3600))
+        .with_language("en".parse().unwrap())
+        .with_allowlist(vec!["example.org".to_owned()]);
         let json = serde_json::to_string(&c).unwrap();
         let back: SearchConstraints = serde_json::from_str(&json).unwrap();
         assert_eq!(back, c);

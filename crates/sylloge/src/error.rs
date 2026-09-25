@@ -141,6 +141,22 @@ pub enum Error {
         location: snafu::Location,
     },
 
+    /// A caller-supplied constraint cannot be applied as written (for
+    /// example a domain-list entry that names no host). Permanent: the
+    /// caller must correct the constraint. Refusing is the fail-closed
+    /// alternative to silently treating an unusable allow/deny entry as
+    /// "matches nothing", which weakens a denylist without any signal.
+    #[snafu(display("invalid constraint `{field}`: {reason}"))]
+    InvalidConstraint {
+        /// The constraint field the value came from.
+        field: String,
+        /// Why the value cannot be applied.
+        reason: String,
+        /// Source location captured at the point the error was built.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
     /// Transient I/O failure at the network layer (connection reset, DNS
     /// blip, temporary TLS handshake error). Retry-safe.
     #[snafu(display("transient I/O failure: {message}"))]
@@ -353,6 +369,7 @@ impl Error {
             }
             | Self::Unauthorized { .. }
             | Self::InvalidQuery { .. }
+            | Self::InvalidConstraint { .. }
             | Self::PermanentIo { .. }
             | Self::Unsupported { .. }
             | Self::TaskUnavailable { .. }
@@ -464,6 +481,23 @@ mod tests {
         }
         .build();
         assert!(e.is_permanent());
+    }
+
+    #[test]
+    fn invalid_constraint_is_permanent() {
+        let e: Error = InvalidConstraintSnafu {
+            field: "domain_denylist".to_owned(),
+            reason: "entry names no host".to_owned(),
+        }
+        .build();
+        assert!(
+            e.is_permanent(),
+            "a malformed constraint never clears on retry"
+        );
+        assert!(
+            e.to_string().contains("domain_denylist"),
+            "the message must name the offending field"
+        );
     }
 
     #[test]

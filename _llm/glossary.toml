@@ -5,7 +5,7 @@ generated = false
 source_docs = [
   "README.md",
   "CLAUDE.md",
-  "kanon/projects/zetesis/STATE.md",
+  "docs/design/contract-baseline.md",
 ]
 
 [glossary]
@@ -13,30 +13,55 @@ description = "Domain vocabulary for zetesis."
 
 [[terms]]
 term = "zetesis"
-definition = "Systematic inquiry; the research substrate and planned facade crate."
+definition = "Systematic inquiry; the research substrate and its facade crate."
 canonical = true
 
 [[terms]]
 term = "sylloge"
-definition = "Collection; planned provider routing, budget, cache, and deep-research crate."
+definition = "Collection; the crate carrying the provider, constraint, network-target, citation, result, cost, budget, and deep-research lifecycle types. Routing, cache, static acquisition, and the durable ledger are planned here."
 canonical = true
 
 [[terms]]
 term = "elenkhos"
-definition = "Cross-examination; planned retrospective steel-manning crate."
+definition = "Cross-examination; reserved crate boundary for the planned retrospective steel-manning engine."
 canonical = true
 
 [[terms]]
 term = "synopsis"
-definition = "Seeing together; planned briefing synthesis crate."
+definition = "Seeing together; reserved crate boundary for the planned briefing synthesizer."
 canonical = true
 
 [[terms]]
 term = "Tier 0"
-definition = "Free-first academic/reference provider set."
+definition = "Free-first academic/reference provider set; the default route."
 canonical = true
 
 [[terms]]
 term = "budget gate"
-definition = "Per-query, per-day, and per-consumer spending/usage constraint."
+definition = "Per-query, per-consumer-day, and fleet-day paid-spend ceilings. Paid use stays disabled until explicitly configured and reserved."
+canonical = true
+
+[[terms]]
+term = "ValidatedTarget"
+definition = "Non-forgeable proof that a URL passed the fail-closed network-target check, carrying the resolved addresses a fetch must connect to."
+canonical = true
+
+[[terms]]
+term = "static acquisition"
+definition = "Anonymous, bounded HTTP GET of one target with per-hop validation, bounded transfer and decoding, and static text extraction, owned by zetesis."
+canonical = true
+
+[[terms]]
+term = "evidence envelope"
+definition = "Versioned record of one static acquisition: hops, limits, response metadata, body and text digests, extractor identity, outcome, and fingerprint. Consumers store it verbatim; body bytes stay in consumer custody."
+canonical = true
+
+[[terms]]
+term = "reservation"
+definition = "Ledger-minted authorization for paid spend, keyed by provider attempt identity; reserve is idempotent per attempt and settle or release is terminal."
+canonical = true
+
+[[terms]]
+term = "model contract"
+definition = "The consumer-granted binding through which deep inquiry may call a model; Logismos executes the model."
 canonical = true

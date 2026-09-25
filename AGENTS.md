@@ -1,7 +1,7 @@
 <!--
 scope: zetesis dispatch conventions and agent entry points
 defers_to: CLAUDE.md for repo conventions and design principles; kanon standards for universal engineering policy
-tightens: gate discipline (truthful Gate-Passed trailers, no history rewrites, no AI indicators)
+tightens: gate discipline (run the gate before pushing, no history rewrites, no AI indicators)
 -->
 
 # zetesis — agent entry point
@@ -12,7 +12,8 @@ Read CLAUDE.md first for repo conventions and design principles.
 
 - `README.md` — purpose, boundaries, consumer map
 - `CLAUDE.md` — design principles, repo conventions, gotchas
-- `_llm/architecture.toml` — planned layers and crate roles
+- `docs/design/contract-baseline.md` — public API inventory (enforced versus convention), contract ownership, identity, evidence envelope, storage
+- `_llm/architecture.toml` — landed and planned crate roles
 - `_llm/current_state.toml` — current phase, open threads
 - `_llm/decisions.toml` — accepted design decisions
 - `_llm/glossary.toml` — domain vocabulary
@@ -20,11 +21,11 @@ Read CLAUDE.md first for repo conventions and design principles.
 
 ## Current state
 
-Phase 1 scaffold. Four-crate workspace is present: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
-`sylloge` owns the provider/result/budget/citation/deep-research surface. `zetesis` re-exports it as the facade.
-`elenkhos` and `synopsis` are marker-type scaffolds holding their crate boundary.
-`LocalDeepResearch` has the in-memory task lifecycle and offline five-node loop fixture for deterministic testing without network calls.
-Real logismos/HTTP integration is deferred — see `_llm/current_state.toml` `[[open_threads]]` for current tracker status.
+Pre-release. Four-crate workspace: `zetesis`, `sylloge`, `elenkhos`, and `synopsis`.
+`sylloge` owns the provider, constraint, network-target, citation, result, cost, budget, and deep-research lifecycle types. `zetesis` re-exports them as the facade.
+`elenkhos` and `synopsis` are marker types holding their crate boundary.
+`LocalDeepResearch` is an in-memory task lifecycle with an offline five-node loop fixture; it calls no model and no network.
+No provider adapter, HTTP client, cache, durable ledger, or model binding exists. `docs/design/contract-baseline.md` lists what each public type enforces and what is caller convention.
 
 ## Open work
 
@@ -32,16 +33,20 @@ See `_llm/current_state.toml` `[[open_threads]]` — the single authoritative re
 
 ## Gate
 
-Every PR commit must carry a truthful `Gate-Passed:` trailer. Run locally first:
+Run locally before pushing:
 
 ```sh
-~/.cargo/bin/cargo fmt --all -- --check
-~/.cargo/bin/cargo check --workspace --all-targets
-~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
-~/.cargo/bin/cargo test --workspace --all-targets
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace
+cargo test --workspace --doc
+cargo deny check
 ```
 
-Then commit with: `Gate-Passed: kanon-ci/local 1.97.1`
+`cargo test --workspace --doc` runs the compile-fail contracts that `cargo nextest` skips. The acceptance verifier is `kanon gate`.
+
+The `Gate-Passed:` commit trailer is advisory (fleet rule since 2026-09-08). The bar is the forge-published gate-attestation status plus the repository's required checks.
 
 ## Forbidden
 

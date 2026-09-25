@@ -1,0 +1,15 @@
+{
+  "max_results": 10,
+  "freshness_window": null,
+  "freshness_policy": "strict",
+  "language": null,
+  "domain_allowlist": null,
+  "domain_denylist": null,
+  "budget": {
+    "per_query_cap_micro_cents": 0,
+    "per_day_cap_micro_cents": 0,
+    "per_fleet_day_cap_micro_cents": 0,
+    "per_agent_cap_micro_cents": 0,
+    "allow_paid_tier": false
+  }
+}
