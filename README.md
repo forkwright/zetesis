@@ -61,6 +61,7 @@ This README records purpose, boundaries, consumer map, and crate shape. It does 
 ## Design Notes
 
 - [Contract baseline](docs/design/contract-baseline.md) - public API inventory (enforced versus convention), API delta, contract ownership, identity and idempotency, evidence envelope v1, resource dimensions, cancellation, error classification, and storage.
+- [Consumer contracts](docs/design/consumer-contracts.md) - Phase 00 S2 freeze of the producer contract for tool-hosting consumers, the Dioptron static-acquisition handoff, producer design corrections, coverage, and the facts still needed from Akroasis, inference, and Kanon owners.
 - [Multi-signal classifiers](docs/research/multi-signal-classifiers.md) - required evidence record shape for classifier designs that combine weighted signals before export.
 - [Deep research provider decision](docs/research/deep-research-provider-decision.md) - Phase 05 decision to vendor the local-deep-researcher loop pattern, treat the gpt-researcher `vllm_openai` adapter shape as prior art, and reject open_deep_research as the default contract.
 
