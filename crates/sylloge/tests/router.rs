@@ -884,6 +884,24 @@ async fn cache_key_is_stable_and_sensitive_to_every_input() {
         base,
         "whitespace does not change the key"
     );
+    let spelled = |entries: &[&str]| {
+        SearchConstraints::default().with_denylist(entries.iter().map(|&e| e.to_owned()).collect())
+    };
+    assert_eq!(
+        key(
+            "q",
+            QueryShape::GeneralResearch,
+            spelled(&["b.example", "A.Example."])
+        )
+        .await,
+        key(
+            "q",
+            QueryShape::GeneralResearch,
+            spelled(&[".a.example", "b.example", "a.example"])
+        )
+        .await,
+        "domain entries that canonicalize alike, in any order, give one key"
+    );
     for (label, other) in [
         (
             "case",

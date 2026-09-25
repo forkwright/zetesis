@@ -98,8 +98,10 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// [`ResearchResult::cache_key`] is `sha256:` plus the hex SHA-256 of a
 /// domain-separated, length-prefixed encoding of the query (whitespace
 /// collapsed, case kept, because query syntax can be case-sensitive), the
-/// shape, and the JSON-serialized constraints. Equal inputs give equal
-/// keys.
+/// shape, and the JSON-serialized constraints with each domain list
+/// canonicalized, sorted, and deduplicated. Equal inputs give equal keys.
+/// The key covers only what the router is given; it is not the full query
+/// identity, which also carries consumer and scope identifiers.
 pub struct Router {
     providers: Vec<Arc<dyn Provider>>,
 }
@@ -185,7 +187,7 @@ impl Router {
                 ),
             }
         );
-        let cache_key = cache_key(&normalized, shape, constraints)?;
+        let cache_key = cache_key(&normalized, shape, &screen.canonical_constraints())?;
 
         let mut provenance = Vec::with_capacity(route.len());
         let mut cost = CostTracking::default();
@@ -238,6 +240,20 @@ impl<'c> Screen<'c> {
             deny: parse_domain_rules("domain_denylist", constraints.domain_denylist.as_deref())?,
             allow: parse_domain_rules("domain_allowlist", constraints.domain_allowlist.as_deref())?,
         })
+    }
+
+    /// The caller's constraints with each domain list replaced by its
+    /// canonical entries, sorted and deduplicated, so spellings that parse
+    /// to the same rules produce one cache key.
+    fn canonical_constraints(&self) -> SearchConstraints {
+        let canonical = |rules: &Vec<DomainRule>| {
+            let entries: BTreeSet<String> = rules.iter().map(DomainRule::canonical).collect();
+            entries.into_iter().collect::<Vec<_>>()
+        };
+        let mut constraints = self.constraints.clone();
+        constraints.domain_denylist = self.deny.as_ref().map(canonical);
+        constraints.domain_allowlist = self.allow.as_ref().map(canonical);
+        constraints
     }
 
     /// Screen one provider's hits into `candidates` and describe the

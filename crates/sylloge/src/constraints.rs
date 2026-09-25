@@ -230,6 +230,16 @@ impl DomainRule {
         }
     }
 
+    /// The rule's canonical spelling: the punycode, lowercase domain, or
+    /// the canonical address. Two entries that parse to the same rule have
+    /// the same canonical spelling.
+    pub(crate) fn canonical(&self) -> String {
+        match self {
+            Self::Suffix(domain) => domain.clone(),
+            Self::Address(addr) => addr.to_string(),
+        }
+    }
+
     /// Whether this rule matches the canonical `host` of a parsed URL.
     pub(crate) fn matches(&self, host: &Host<&str>) -> bool {
         match (self, host) {
@@ -718,6 +728,20 @@ mod tests {
                 "{entry:?} must be an invalid constraint, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn domain_rule_canonical_spelling_is_shared_by_equivalent_entries() {
+        assert_eq!(
+            rule(".EXAMPLE.org.").canonical(),
+            rule("example.org").canonical(),
+            "case and optional dots do not change the canonical spelling"
+        );
+        assert_eq!(
+            rule("0x7f.1").canonical(),
+            "127.0.0.1",
+            "an alternate IPv4 spelling canonicalizes to dotted decimal"
+        );
     }
 
     #[test]
