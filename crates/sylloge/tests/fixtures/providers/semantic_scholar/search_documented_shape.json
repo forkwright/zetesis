@@ -1,0 +1,57 @@
+{
+  "total": "3",
+  "offset": 0,
+  "next": 3,
+  "data": [
+    {
+      "paperId": "0f3c9a1b2d4e5f60718293a4b5c6d7e8f9012345",
+      "corpusId": 900000001,
+      "externalIds": {
+        "DOI": "10.5555/Synthetic.Journal.2019.07",
+        "MAG": "3000000001",
+        "CorpusId": 900000001
+      },
+      "url": "https://www.semanticscholar.org/paper/0f3c9a1b2d4e5f60718293a4b5c6d7e8f9012345",
+      "title": "Routing Queries Across Free Scholarly Indexes",
+      "abstract": "A synthetic journal record used only as a parser fixture.",
+      "venue": "Journal of Synthetic Fixtures",
+      "year": 2019,
+      "publicationDate": "2019-07-15",
+      "publicationTypes": ["JournalArticle", "Review"],
+      "authors": [
+        {"authorId": "1000001", "name": "Ada Example"},
+        {"authorId": "1000002", "name": "Brook Sample"}
+      ]
+    },
+    {
+      "paperId": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+      "corpusId": 900000002,
+      "externalIds": {
+        "ArXiv": "2101.00001",
+        "DOI": "10.48550/arXiv.2101.00001",
+        "CorpusId": 900000002
+      },
+      "url": "https://www.semanticscholar.org/paper/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+      "title": "Deduplicating Preprints by Stable Identity",
+      "abstract": null,
+      "venue": "arXiv.org",
+      "year": 2021,
+      "publicationDate": null,
+      "publicationTypes": null,
+      "authors": [{"authorId": "1000003", "name": "Casey Placeholder"}]
+    },
+    {
+      "paperId": "2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e",
+      "corpusId": 900000003,
+      "externalIds": {"DBLP": "conf/synthetic/Example20", "CorpusId": 900000003},
+      "url": "https://www.semanticscholar.org/paper/2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e",
+      "title": "A Workshop Paper Without a Journal",
+      "abstract": "A synthetic conference record.",
+      "venue": "Synthetic Workshop",
+      "year": 2020,
+      "publicationDate": "2020-03-01",
+      "publicationTypes": ["Conference"],
+      "authors": []
+    }
+  ]
+}

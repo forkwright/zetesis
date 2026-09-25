@@ -56,6 +56,12 @@ hyper = { version = "1", default-features = false, features = ["client", "http1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 jiff = { version = "0.2", features = ["serde"] }
 language-tags = { version = "0.3", features = ["serde"] }
+# WHY: arXiv answers in Atom 1.0 XML (namespaced elements, entity
+# references, CDATA), so its parser needs a real XML reader rather than
+# string scanning. No default features: no serde bridge, no encoding_rs
+# (the Atom feed is UTF-8), no async reader. Held at 0.41 because 0.42
+# raises the minimum Rust version past this workspace's `rust-version`.
+quick-xml = { version = "0.41", default-features = false }
 # WHY: SHA-256 of the TLS peer's leaf certificate for hop evidence. ring is
 # already in the graph as rustls's crypto provider, so a direct dependency
 # adds no crate (a separate `sha2` stack would).

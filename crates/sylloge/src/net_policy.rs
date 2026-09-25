@@ -78,16 +78,17 @@ impl SearchConstraints {
     /// 1. the scheme is `http` or `https`;
     /// 2. the URL carries no userinfo;
     /// 3. a host is present (see the WARNING below);
-    /// 4. `resolver` resolves the host to concrete address(es), none of which
+    /// 4. the caller's domain deny and allow lists, matched against the URL
+    ///    host before any lookup, so a denied or unlisted host never reaches
+    ///    the resolver. The lists only narrow: passing them skips nothing
+    ///    below, so an allowlist can never re-admit a network-unsafe target;
+    /// 5. `resolver` resolves the host to concrete address(es), none of which
     ///    may be loopback, private, link-local, unspecified, multicast,
     ///    reserved, or documentation, nor an IPv6 transition address (NAT64,
     ///    6to4, Teredo) that delivers to such an IPv4 address. This is checked on the RESOLVED address, never the URL
     ///    text: a hostname that resolves to `127.0.0.1` fails here even though
     ///    its text names no local address, which is what a purely textual check
-    ///    misses (DNS rebinding);
-    /// 5. the caller's domain allow/denylist, evaluated last so a
-    ///    caller-configured allowlist can never re-admit a
-    ///    network-unsafe target.
+    ///    misses (DNS rebinding).
     ///
     /// The host is resolved exactly once per call. Because a DNS answer
     /// can change between this check and a later connect (rebinding), a
@@ -169,10 +170,7 @@ impl SearchConstraints {
             .build());
         };
 
-        // WHY: parse the caller's domain lists before any DNS I/O so an
-        // unusable entry fails closed without touching the network.
-        let denylist = parse_domain_rules("domain_denylist", self.domain_denylist.as_deref())?;
-        let allowlist = parse_domain_rules("domain_allowlist", self.domain_allowlist.as_deref())?;
+        self.check_domain_rules(url, &host)?;
 
         let addrs = match &host {
             Host::Ipv4(v4) => vec![IpAddr::V4(*v4)],
@@ -202,25 +200,6 @@ impl SearchConstraints {
             }
         }
 
-        if let Some(rules) = &denylist {
-            ensure!(
-                !rules.iter().any(|rule| rule.matches(&host)),
-                UnsafeTargetSnafu {
-                    url: url.to_string(),
-                    reason: "host matches the configured denylist",
-                }
-            );
-        }
-        if let Some(rules) = &allowlist {
-            ensure!(
-                rules.iter().any(|rule| rule.matches(&host)),
-                UnsafeTargetSnafu {
-                    url: url.to_string(),
-                    reason: "host does not match the configured allowlist",
-                }
-            );
-        }
-
         Ok(ValidatedTarget {
             url: url.clone(),
             addrs,
@@ -229,6 +208,42 @@ impl SearchConstraints {
 }
 
 impl SearchConstraints {
+    /// Apply the caller's domain deny and allow lists to `url`'s `host`.
+    ///
+    /// WHY: the rules match the parsed URL host, never a resolved address,
+    /// so they run before any DNS I/O. An unusable entry fails closed, and a
+    /// denied or unlisted host is refused without its name reaching the
+    /// resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::InvalidConstraint`] for an unusable entry and
+    /// [`crate::Error::UnsafeTarget`] when the host is denied or outside
+    /// the allowlist.
+    pub(crate) fn check_domain_rules(&self, url: &Url, host: &Host<&str>) -> Result<()> {
+        let denylist = parse_domain_rules("domain_denylist", self.domain_denylist.as_deref())?;
+        let allowlist = parse_domain_rules("domain_allowlist", self.domain_allowlist.as_deref())?;
+        if let Some(rules) = &denylist {
+            ensure!(
+                !rules.iter().any(|rule| rule.matches(host)),
+                UnsafeTargetSnafu {
+                    url: url.to_string(),
+                    reason: "host matches the configured denylist",
+                }
+            );
+        }
+        if let Some(rules) = &allowlist {
+            ensure!(
+                rules.iter().any(|rule| rule.matches(host)),
+                UnsafeTargetSnafu {
+                    url: url.to_string(),
+                    reason: "host does not match the configured allowlist",
+                }
+            );
+        }
+        Ok(())
+    }
+
     /// Parse both domain lists without checking any URL, so a caller that
     /// resolves hosts itself ([`super::StaticAcquirer`]) can refuse an
     /// unusable entry before any DNS I/O, as
@@ -246,7 +261,10 @@ impl SearchConstraints {
 
 /// Parse an optional domain list into canonical rules (see
 /// [`DomainRule`]); `None` stays `None` (no constraint).
-fn parse_domain_rules(field: &str, entries: Option<&[String]>) -> Result<Option<Vec<DomainRule>>> {
+pub(crate) fn parse_domain_rules(
+    field: &str,
+    entries: Option<&[String]>,
+) -> Result<Option<Vec<DomainRule>>> {
     entries
         .map(|entries| {
             entries
@@ -557,6 +575,43 @@ mod tests {
                 "host outside egress policy",
             ))
         }
+    }
+
+    /// Test [`Resolver`] that must never be consulted.
+    struct UnreachableResolver;
+
+    impl Resolver for UnreachableResolver {
+        fn resolve(&self, host: &str, _port: u16) -> std::io::Result<Vec<IpAddr>> {
+            panic!("the resolver was consulted for {host}");
+        }
+    }
+
+    #[test]
+    fn domain_lists_are_applied_before_resolution() {
+        let denied = SearchConstraints::new(10, BudgetConstraint::default())
+            .with_denylist(vec!["denied.example".to_owned()]);
+        let err = denied
+            .check_url_with(
+                &Url::parse("https://api.denied.example/x").unwrap(),
+                &UnreachableResolver,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::UnsafeTarget { .. }),
+            "a denylisted host is refused without a lookup: {err:?}"
+        );
+        let allowed = SearchConstraints::new(10, BudgetConstraint::default())
+            .with_allowlist(vec!["other.example".to_owned()]);
+        let err = allowed
+            .check_url_with(
+                &Url::parse("https://denied.example/x").unwrap(),
+                &UnreachableResolver,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::UnsafeTarget { .. }),
+            "a host outside the allowlist is refused without a lookup: {err:?}"
+        );
     }
 
     #[test]

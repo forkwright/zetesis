@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <link href="http://arxiv.org/api/query?search_query=all:fixture&amp;id_list=&amp;start=0&amp;max_results=10" rel="self" type="application/atom+xml"/>
+  <title>ArXiv Query: search_query=all:fixture&amp;id_list=&amp;start=0&amp;max_results=10</title>
+  <id>http://arxiv.org/api/fixtureEmptyFeed0000000000000</id>
+  <updated>2026-09-25T00:00:00-04:00</updated>
+  <opensearch:totalResults>0</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <opensearch:itemsPerPage>10</opensearch:itemsPerPage>
+</feed>

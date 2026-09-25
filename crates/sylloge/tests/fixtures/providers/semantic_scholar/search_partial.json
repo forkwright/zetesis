@@ -1,0 +1,23 @@
+{
+  "total": 2,
+  "offset": 0,
+  "data": [
+    {
+      "paperId": "4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70",
+      "title": "Only the Default Fields"
+    },
+    {
+      "paperId": "5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081",
+      "corpusId": null,
+      "externalIds": null,
+      "url": null,
+      "title": "Every Optional Field Null",
+      "abstract": null,
+      "venue": "",
+      "year": null,
+      "publicationDate": null,
+      "publicationTypes": null,
+      "authors": null
+    }
+  ]
+}

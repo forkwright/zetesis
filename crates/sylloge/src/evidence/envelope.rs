@@ -186,7 +186,8 @@ impl PartialReason {
 #[non_exhaustive]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
-    /// Transfer and extraction completed.
+    /// Transfer finished within limits and, for document media, extraction
+    /// finished.
     Complete,
     /// The transfer completed but the evidence is incomplete.
     Partial {

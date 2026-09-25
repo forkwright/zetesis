@@ -20,6 +20,18 @@ where
     })
 }
 
+/// `skip_serializing_if` predicate for a count whose absence means zero.
+///
+/// WHY: a defaulted count added to an existing record keeps that record's
+/// serialized form unchanged whenever the count is zero.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+pub(crate) fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
 /// Serialize a value as its `Display` text and parse it back with
 /// `FromStr`, in every serde format.
 ///

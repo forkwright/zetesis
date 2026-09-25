@@ -149,7 +149,8 @@ fn append_unique_hits(all_hits: &mut Vec<ResultHit>, hits: Vec<ResultHit>) {
 fn append_provenance(provenance: &mut Vec<ProvenanceEntry>, hits: &[ResultHit]) {
     let mut seen: BTreeSet<String> = provenance
         .iter()
-        .map(|entry| entry.citation.source_url.as_str().to_owned())
+        .filter_map(|entry| entry.citation.as_ref())
+        .map(|citation| citation.source_url.as_str().to_owned())
         .collect();
 
     for citation in hits.iter().flat_map(|hit| hit.citations.iter()) {

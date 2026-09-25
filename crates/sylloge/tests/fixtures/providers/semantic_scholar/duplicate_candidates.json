@@ -1,0 +1,82 @@
+{
+  "total": 5,
+  "offset": 0,
+  "data": [
+    {
+      "paperId": "a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6",
+      "externalIds": {
+        "ArXiv": "2101.00001",
+        "DOI": "10.5555/synthetic.2021.042"
+      },
+      "url": "https://www.semanticscholar.org/paper/a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6",
+      "title": "Deduplicating Preprints by Stable Identity",
+      "year": 2021,
+      "publicationDate": "2021-06-01",
+      "publicationTypes": [
+        "JournalArticle"
+      ],
+      "authors": [
+        {
+          "authorId": "1000003",
+          "name": "Casey Placeholder"
+        }
+      ]
+    },
+    {
+      "paperId": "b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7",
+      "url": "https://www.semanticscholar.org/paper/b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7",
+      "title": "Routing Queries Across Free Scholarly Indexes",
+      "year": 2019,
+      "publicationDate": "2019-07-15",
+      "authors": [
+        {
+          "authorId": "1000001",
+          "name": "Ada Example"
+        }
+      ]
+    },
+    {
+      "paperId": "c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+      "externalIds": {
+        "ArXiv": "2102.00002",
+        "DOI": "10.5555/synthetic.2022.111"
+      },
+      "url": "https://www.semanticscholar.org/paper/c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+      "title": "Conflicting Identifiers in Practice",
+      "year": 2021,
+      "authors": [
+        {
+          "authorId": "1000004",
+          "name": "Eli Stand-in"
+        }
+      ]
+    },
+    {
+      "paperId": "d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+      "url": "https://www.semanticscholar.org/paper/d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+      "title": "Same Title, Same Year",
+      "year": 2020,
+      "authors": [
+        {
+          "authorId": "1000005",
+          "name": "Fern Proxy"
+        }
+      ]
+    },
+    {
+      "paperId": "e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a",
+      "externalIds": {
+        "DOI": "10.48550/arXiv.2107.00005"
+      },
+      "url": "https://www.semanticscholar.org/paper/e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a",
+      "title": "An arXiv DOI Meets a Journal DOI",
+      "year": 2021,
+      "authors": [
+        {
+          "authorId": "1000007",
+          "name": "Hollis Surrogate"
+        }
+      ]
+    }
+  ]
+}

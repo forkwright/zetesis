@@ -4,24 +4,26 @@
 
 pub use elenkhos as steelman;
 pub use sylloge::{
-    Acquisition, AcquisitionFailure, AcquisitionLimits, BodyRecord, BoxFut, BudgetConstraint,
-    BudgetExceededSnafu, BudgetScope, Charset, CharsetSource, Citation, ConnectAttempt,
-    ConnectDeniedSnafu, ConnectError, ConnectIoSnafu, ConnectOutcome, ConnectTimedOutSnafu,
-    ConnectedStream, Connector, ContentCoding, CostTracking, DAY_WINDOW, DeepDepth, DeepResearch,
-    DirectConnector, DomainDeniedSnafu, DowngradePolicy, EVIDENCE_SCHEMA_ID,
-    EVIDENCE_SCHEMA_VERSION, Error, ErrorClass, EvidenceEnvelope, ExtractionRecord, ExtractorId,
-    FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy, HopRecord,
-    InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization, Media,
-    MissingCitationsSnafu, OfflineFixture, Outcome, OversizedPayloadSnafu, PartialReason,
-    PermanentIoSnafu, Producer, ProvenanceEntry, Provider, ProviderFailureSnafu, ProviderId,
-    ProviderSpend, ProviderTier, PublicationPrecision, PublicationProvenance, PublicationTime,
-    PublicationTimeCapability, QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimitedSnafu,
+    Acquisition, AcquisitionFailure, AcquisitionLimits, Arxiv, AttemptOutcome, BodyRecord, BoxFut,
+    BudgetConstraint, BudgetExceededSnafu, BudgetScope, Charset, CharsetSource, Citation,
+    ConnectAttempt, ConnectDeniedSnafu, ConnectError, ConnectIoSnafu, ConnectOutcome,
+    ConnectTimedOutSnafu, ConnectedStream, Connector, ContentCoding, CostTracking, DAY_WINDOW,
+    DeepDepth, DeepResearch, DirectConnector, DomainDeniedSnafu, DowngradePolicy,
+    EVIDENCE_SCHEMA_ID, EVIDENCE_SCHEMA_VERSION, EndpointPolicy, Error, ErrorClass,
+    EvidenceEnvelope, EvidenceState, ExtractionRecord, ExtractorId, FatalCorruptionSnafu,
+    FreshnessBasis, FreshnessDecision, FreshnessPolicy, HopRecord, InvalidConstraintSnafu,
+    InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization, Media, MissingCitationsSnafu,
+    OfflineFixture, Outcome, OversizedPayloadSnafu, ParsedResponse, PartialReason,
+    PermanentIoSnafu, Producer, ProvenanceEntry, Provider, ProviderAnswer, ProviderAttempt,
+    ProviderFailureSnafu, ProviderId, ProviderRequest, ProviderSpend, ProviderTier,
+    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
+    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimit, RateLimitedSnafu, RefusalReason,
     ReplayOutcome, ResearchResult, ResearchStatus, Resolver, ResponseRecord, Result, ResultHit,
-    SchemePolicy, SearchConstraints, Segment, SourceKind, SourceRetriever, SpendEvent, SpendLedger,
-    StaticAcquirer, StaticAcquirerBuilder, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TlsRecord, TransientIoSnafu, TrustAnchors,
-    UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget, evaluate_freshness,
-    replay,
+    Router, SchemePolicy, SearchConstraints, Segment, SemanticScholar, SourceKind, SourceRetriever,
+    SpendEvent, SpendLedger, StaticAcquirer, StaticAcquirerBuilder, Synthesizer, SystemResolver,
+    TaskId, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TlsRecord, TransientIoSnafu,
+    TrustAnchors, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
+    Wikipedia, evaluate_freshness, replay,
 };
 pub use synopsis as briefing;
 
@@ -172,6 +174,114 @@ mod tests {
         assert!(
             no_stream.is_none(),
             "ConnectedStream is nameable as a trait object"
+        );
+    }
+
+    /// An acquirer the cohort checks never fetch through; building one
+    /// needs a trust anchor, so any self-signed certificate will do.
+    fn offline_acquirer() -> std::sync::Arc<StaticAcquirer> {
+        let anchor = rcgen::generate_simple_self_signed(vec!["unused.example".to_owned()]).unwrap();
+        let limits = AcquisitionLimits::new(
+            SchemePolicy::HttpsOnly,
+            0,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
+            1024 * 1024,
+        )
+        .unwrap();
+        let trust = TrustAnchors::from_der([anchor.cert.der().as_ref()]).unwrap();
+        std::sync::Arc::new(StaticAcquirer::builder(limits, trust).build().unwrap())
+    }
+
+    #[test]
+    fn provider_cohort_is_reachable_through_facade() {
+        // WHY: the first provider cohort is consumer-facing; exercise each
+        // provider through the facade path rather than only asserting the
+        // `pub use` compiles.
+        let constraints = SearchConstraints::new(3, BudgetConstraint::free_only());
+        let acquirer = offline_acquirer();
+        let wikipedia = Wikipedia::new(
+            std::sync::Arc::clone(&acquirer),
+            "facade-check/0.0 (https://example.org/contact)",
+        )
+        .unwrap();
+        let requests: [ProviderRequest; 3] = [
+            SemanticScholar::request("q", &constraints).unwrap(),
+            Arxiv::request("q", &constraints).unwrap(),
+            wikipedia.request("q", &constraints).unwrap(),
+        ];
+        let cohort: [&dyn Provider; 3] = [
+            &SemanticScholar::new(std::sync::Arc::clone(&acquirer), std::time::Duration::ZERO),
+            &Arxiv::new(acquirer),
+            &wikipedia,
+        ];
+        assert_eq!(
+            cohort.map(Provider::name),
+            ["semantic_scholar", "arxiv", "wikipedia"],
+            "the cohort implements the provider trait through the facade"
+        );
+        assert!(
+            requests.iter().all(|r| r.url.scheme() == "https"),
+            "every cohort endpoint is https"
+        );
+        let policies: [EndpointPolicy; 3] =
+            [SemanticScholar::POLICY, Arxiv::POLICY, Wikipedia::POLICY];
+        let paced: Vec<RateLimit> = policies.iter().filter_map(|p| p.rate_limit).collect();
+        assert_eq!(
+            paced.len(),
+            2,
+            "arXiv and Wikipedia document per-client limits"
+        );
+
+        let parsed: ParsedResponse = Wikipedia::parse(
+            200,
+            &[],
+            br#"{"pages":[]}"#,
+            "2026-09-25T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            parsed.hits.is_empty() && parsed.malformed_records == 0,
+            "an empty page list parses through the facade"
+        );
+    }
+
+    #[test]
+    fn router_and_receipts_are_reachable_through_facade() {
+        let empty = ResearchResult::empty("q", QueryShape::QuickFactual, "k");
+        assert_eq!(
+            empty.evidence_state(),
+            EvidenceState::Unanswered,
+            "evidence state is reachable through the facade"
+        );
+        let answer = ProviderAnswer::new(Ok(empty), vec!["sha256:00".to_owned()], 1);
+        assert_eq!(
+            (answer.evidence_fingerprints, answer.requests_sent),
+            (vec!["sha256:00".to_owned()], 1),
+            "a provider answer is reachable through the facade"
+        );
+
+        let router = Router::new(Vec::new(), std::time::Duration::from_secs(30)).unwrap();
+        assert!(
+            format!("{router:?}").contains("Router"),
+            "the router is reachable and debuggable"
+        );
+        let attempt: ProviderAttempt = serde_json::from_value(serde_json::json!({
+            "ordinal": 0,
+            "tier": "tier1_cheap",
+            "outcome": {"status": "refused", "reason": "paid_routing_unavailable"},
+        }))
+        .unwrap();
+        assert_eq!(
+            attempt.outcome,
+            AttemptOutcome::Refused {
+                reason: RefusalReason::PaidRoutingUnavailable
+            },
+            "receipt types decode through the facade"
+        );
+        assert!(
+            attempt.evidence_fingerprints.is_empty(),
+            "a receipt without evidence decodes with none"
         );
     }
 

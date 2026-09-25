@@ -1156,6 +1156,52 @@ async fn unusable_domain_list_is_rejected_before_resolution() {
 }
 
 #[tokio::test]
+async fn domain_lists_refuse_a_host_before_any_lookup() {
+    // WHY: the rules match the URL host, never an address, so a denied or
+    // unlisted host is refused without its name reaching the resolver.
+    for (constraints, case) in [
+        (
+            free().with_denylist(vec!["denied.example".to_owned()]),
+            "denylisted",
+        ),
+        (
+            free().with_allowlist(vec!["other.example".to_owned()]),
+            "not allowlisted",
+        ),
+    ] {
+        let h = Harness::new(
+            limits(SchemePolicy::HttpAndHttps, 0),
+            ScriptedResolver::new().answer("denied.example", &["8.8.8.8"]),
+        );
+
+        let acquisition = h
+            .acquirer
+            .acquire(
+                &Url::parse("http://denied.example/").unwrap(),
+                &constraints,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                failure(&acquisition),
+                AcquisitionFailure::UnsafeTarget { .. }
+            ),
+            "{case}: refused by the target policy: {:?}",
+            acquisition.envelope().outcome()
+        );
+        assert!(
+            h.resolver.calls().is_empty(),
+            "{case}: no DNS lookup for a refused host: {:?}",
+            h.resolver.calls()
+        );
+        assert!(h.connector.attempts().is_empty(), "{case}: nothing dialed");
+    }
+}
+
+#[tokio::test]
 async fn acquire_future_is_send() {
     fn assert_send<T: Send>(_: &T) {}
     fn assert_shareable<T: Send + Sync>() {}

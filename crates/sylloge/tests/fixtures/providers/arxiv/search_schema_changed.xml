@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns:fx="urn:example:fixture-extension">
+  <fx:feedNote>An element from a namespace the parser does not know.</fx:feedNote>
+  <entry fx:rank="1">
+    <id>http://arxiv.org/abs/2105.00005v3</id>
+    <updated>2021-05-20T08:00:00Z</updated>
+    <title>Entities &amp; Unknown Elements: &#x3B1;-Routing</title>
+    <summary><![CDATA[A CDATA abstract with <markup> kept as text.]]></summary>
+    <author>
+      <name>Gale Mock</name>
+      <arxiv:orcid>0000-0000-0000-0000</arxiv:orcid>
+    </author>
+    <arxiv:license>fixture-only element the parser does not know</arxiv:license>
+    <fx:score>0.99</fx:score>
+    <title xmlns="urn:example:fixture-extension">A same-named element in another namespace</title>
+    <link href="http://arxiv.org/abs/2105.00005v3" rel="alternate" type="text/html" fx:extra="ignored"/>
+  </entry>
+</feed>

@@ -1,0 +1,22 @@
+{
+  "total": 1,
+  "offset": 0,
+  "searchVersion": "fixture-only unknown top-level field",
+  "data": [
+    {
+      "paperId": "6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192",
+      "corpusId": 900000006,
+      "externalIds": {"ArXiv": "2103.00006v2", "PubMed": "00000006"},
+      "url": "https://www.semanticscholar.org/paper/6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192",
+      "title": "Fields Added and Removed",
+      "abstract": "The response grew fields and lost publicationTypes and year.",
+      "venue": "arXiv.org",
+      "publicationDate": "2021-03-09",
+      "fieldsOfStudy": ["Computer Science"],
+      "tldr": {"model": "fixture", "text": "An unknown nested object."},
+      "authors": [
+        {"authorId": "1000006", "name": "Dana Fixture", "affiliations": ["Synthetic Lab"]}
+      ]
+    }
+  ]
+}
