@@ -4,10 +4,14 @@
 
 #![expect(clippy::unwrap_used, reason = "test assertions must fail loudly")]
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use jiff::Timestamp;
 use serde_json::json;
 use sylloge::{
-    BudgetConstraint, Error, PublicationTime, ResultHit, SearchConstraints, SourceKind, Wikipedia,
+    AcquisitionLimits, BudgetConstraint, Error, PublicationTime, ResultHit, SchemePolicy,
+    SearchConstraints, SourceKind, StaticAcquirer, TrustAnchors, Wikipedia,
 };
 
 /// Recorded 2026-09-25T18:00:02Z from
@@ -25,6 +29,22 @@ const TYPE_CHANGED: &[u8] = include_bytes!("fixtures/providers/wikipedia/search_
 
 const USER_AGENT: &str = "zetesis-fixture/0.0 (https://example.org/contact) sylloge/0.0";
 
+/// An acquirer these request-builder tests never fetch through; building
+/// one needs a trust anchor, so any self-signed certificate will do.
+fn offline_acquirer() -> Arc<StaticAcquirer> {
+    let anchor = rcgen::generate_simple_self_signed(vec!["unused.example".to_owned()]).unwrap();
+    let limits = AcquisitionLimits::new(
+        SchemePolicy::HttpsOnly,
+        0,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        1024 * 1024,
+    )
+    .unwrap();
+    let trust = TrustAnchors::from_der([anchor.cert.der().as_ref()]).unwrap();
+    Arc::new(StaticAcquirer::builder(limits, trust).build().unwrap())
+}
+
 fn accessed() -> Timestamp {
     "2026-09-25T18:00:02Z".parse().unwrap()
 }
@@ -37,7 +57,7 @@ fn parse_ok(body: &[u8]) -> Vec<ResultHit> {
 
 #[test]
 fn request_sends_the_callers_user_agent_to_the_per_wiki_endpoint() {
-    let wikipedia = Wikipedia::new(USER_AGENT).unwrap();
+    let wikipedia = Wikipedia::new(offline_acquirer(), USER_AGENT).unwrap();
     let request = wikipedia
         .request(
             "transformer attention",
@@ -61,7 +81,7 @@ fn request_sends_the_callers_user_agent_to_the_per_wiki_endpoint() {
 
 #[test]
 fn request_caps_the_limit_at_the_documented_maximum() {
-    let request = Wikipedia::new(USER_AGENT)
+    let request = Wikipedia::new(offline_acquirer(), USER_AGENT)
         .unwrap()
         .request(
             "q",
@@ -129,6 +149,17 @@ fn recorded_sample_maps_to_cited_wiki_hits() {
     assert!(
         (second.score - 0.5).abs() < f32::EPSILON,
         "rank 2 scores 0.5"
+    );
+}
+
+#[test]
+fn excerpt_references_are_decoded_after_highlights_are_stripped() {
+    let body = br#"{"pages":[{"id":7,"key":"Escaped","title":"Escaped","excerpt":"caf&#233; &amp; &lt;span class=&quot;searchmatch&quot;&gt;shown&lt;/span&gt; <span class=\"searchmatch\">hit</span>"}]}"#;
+    let hits = parse_ok(body);
+    assert_eq!(
+        hits.first().map(|hit| hit.snippet.as_str()),
+        Some("caf\u{e9} & <span class=\"searchmatch\">shown</span> hit"),
+        "references decode to text; an escaped highlight is text the page shows, not markup"
     );
 }
 

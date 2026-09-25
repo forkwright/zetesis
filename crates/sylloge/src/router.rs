@@ -70,12 +70,15 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// fatal error aborts the route.
 ///
 /// Each attempt has the router's per-attempt timeout as its deadline. The
-/// attempt first waits for the provider's pacing slot: a provider that
-/// answered with `Retry-After` (a 429, or a 503 carrying one) is not asked
-/// again until that delay has passed. A slot that opens after the deadline
+/// attempt first waits for the provider's pacing slot: requests to one
+/// provider start at least [`Provider::min_request_interval`] apart, and a
+/// provider that answered with `Retry-After` (a 429, or a 503 carrying one)
+/// is not asked again until that delay has passed. A slot that opens after the deadline
 /// fails the attempt as rate-limited at once, without waiting and without
 /// calling the provider. A call still running at the deadline is cancelled
-/// and receipted as timed out.
+/// and receipted as timed out. A receipt names the fingerprints of the
+/// evidence envelopes the provider's call produced
+/// ([`Provider::search_with_evidence`]); the bodies are not kept.
 /// A paid-tier provider is refused unconditionally, whatever the caller's
 /// [`crate::BudgetConstraint`] says: paid spend needs a durable ledger
 /// that can reserve and settle per attempt, which does not exist yet, and
@@ -176,15 +179,11 @@ impl Router {
                 }
             );
         }
-        // NOTE: a provider's documented request interval is not visible
-        // through `dyn Provider` yet, so pacers start with none and pace by
-        // `Retry-After` alone; the transport wiring supplies each
-        // provider's interval from its endpoint policy.
         let providers = providers
             .into_iter()
             .map(|provider| Registered {
+                pacer: Pacer::new(provider.min_request_interval()),
                 provider,
-                pacer: Pacer::new(Duration::ZERO),
             })
             .collect();
         Ok(Self {
@@ -232,13 +231,14 @@ impl Router {
         let mut provenance = Vec::with_capacity(route.len());
         let mut collected = Collected::default();
         for (index, entry) in route.into_iter().enumerate() {
-            let outcome = self
+            let (outcome, evidence_fingerprints) = self
                 .attempt(entry, query, constraints, &screen, &mut collected)
                 .await?;
             let attempt = ProviderAttempt {
                 ordinal: u32::try_from(index).unwrap_or(u32::MAX),
                 tier: entry.provider.tier(),
                 outcome,
+                evidence_fingerprints,
             };
             provenance.push(ProvenanceEntry::attempt(entry.provider.name(), attempt));
         }
@@ -250,7 +250,8 @@ impl Router {
         Ok(result)
     }
 
-    /// One provider attempt, bounded by the per-attempt timeout.
+    /// One provider attempt, bounded by the per-attempt timeout: its
+    /// outcome and the fingerprints of the evidence the provider gathered.
     async fn attempt(
         &self,
         entry: &Registered,
@@ -258,12 +259,13 @@ impl Router {
         constraints: &SearchConstraints,
         screen: &Screen<'_>,
         collected: &mut Collected,
-    ) -> Result<AttemptOutcome> {
+    ) -> Result<(AttemptOutcome, Vec<String>)> {
         let provider = &entry.provider;
         if provider.tier().is_paid() {
-            return Ok(AttemptOutcome::Refused {
+            let refused = AttemptOutcome::Refused {
                 reason: RefusalReason::PaidRoutingUnavailable,
-            });
+            };
+            return Ok((refused, Vec::new()));
         }
         let started = Instant::now();
         let deadline = started.checked_add(self.attempt_timeout).unwrap_or(started);
@@ -273,26 +275,26 @@ impl Router {
                 retry_after_ms: Some(millis(slot.opens_in)),
             }
             .build();
-            return Ok(failed(&error));
+            return Ok((failed(&error), Vec::new()));
         }
         collected
             .cost
             .add(ProviderSpend::new(provider.name(), 0, 1, 1));
-        let Ok(answer) =
-            tokio::time::timeout_at(deadline, provider.search(query, constraints)).await
-        else {
-            return Ok(AttemptOutcome::TimedOut {
+        let call = provider.search_with_evidence(query, constraints);
+        let Ok(answer) = tokio::time::timeout_at(deadline, call).await else {
+            let timed_out = AttemptOutcome::TimedOut {
                 timeout_ms: millis(self.attempt_timeout),
-            });
+            };
+            return Ok((timed_out, Vec::new()));
         };
-        match answer {
+        let outcome = match answer.result {
             Ok(result) => {
                 collected.malformed_records = collected
                     .malformed_records
                     .saturating_add(result.malformed_records);
-                Ok(screen.admit(provider.name(), result, &mut collected.candidates))
+                screen.admit(provider.name(), result, &mut collected.candidates)
             }
-            Err(e) if e.is_fatal() => Err(e),
+            Err(e) if e.is_fatal() => return Err(e),
             Err(e) => {
                 if let Error::RateLimited {
                     retry_after_ms: Some(delay),
@@ -301,9 +303,10 @@ impl Router {
                 {
                     entry.pacer.hold_for(Duration::from_millis(delay)).await;
                 }
-                Ok(failed(&e))
+                failed(&e)
             }
-        }
+        };
+        Ok((outcome, answer.evidence_fingerprints))
     }
 
     /// Registered providers that declare `shape`, in registration order.

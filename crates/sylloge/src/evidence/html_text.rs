@@ -389,6 +389,16 @@ fn find_str(source: &str, from: usize, needle: &str) -> Option<usize> {
     source.get(from..)?.find(needle).map(|p| p + from)
 }
 
+/// Decode the HTML character references in `text` (named, legacy
+/// no-semicolon, and numeric, with the WHATWG remapping) and leave every
+/// other character as it is.
+///
+/// The single reference decoder: the extractor and any provider text that
+/// carries HTML references both use it, so one text decodes one way.
+pub(crate) fn decode_references(text: &str) -> std::borrow::Cow<'_, str> {
+    htmlize::unescape(text)
+}
+
 /// End offset of the character reference starting at `amp` (an `&`), or
 /// `None` when no reference shape follows.
 fn reference_end(source: &str, amp: usize) -> Option<usize> {
@@ -482,7 +492,7 @@ impl Builder {
                     .filter(|&e| e <= end)
                     .and_then(|ref_end| {
                         let raw = source.get(i..ref_end)?;
-                        let decoded = htmlize::unescape(raw);
+                        let decoded = decode_references(raw);
                         (decoded != raw).then(|| (ref_end, decoded.into_owned()))
                     });
                 if let Some((ref_end, text)) = decoded {

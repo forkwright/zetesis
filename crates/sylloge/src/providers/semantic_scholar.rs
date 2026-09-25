@@ -1,5 +1,8 @@
 //! Semantic Scholar Academic Graph paper relevance search.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
@@ -8,18 +11,23 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    DoiIdentity, EndpointPolicy, HitParts, META_ARXIV_DOI, META_ARXIV_ID, META_AUTHORS,
-    META_CORPUS_ID, META_DOI, META_S2_PAPER_ID, META_VENUE, META_YEAR, ParsedResponse,
-    ProviderRequest, accept_json, bounded_detail, check_status, classify_doi, collapse_whitespace,
-    collect_records, endpoint_url, malformed, normalize_arxiv_id, required, result_limit,
-    validated_query,
+    DoiIdentity, Endpoint, EndpointPolicy, HitParts, MEDIA_JSON, META_ARXIV_DOI, META_ARXIV_ID,
+    META_AUTHORS, META_CORPUS_ID, META_DOI, META_S2_PAPER_ID, META_VENUE, META_YEAR,
+    ParsedResponse, ProviderRequest, accept_json, bounded_detail, check_status, classify_doi,
+    collapse_whitespace, collect_records, endpoint_url, malformed, normalize_arxiv_id, required,
+    result_limit, search_endpoint, validated_query,
 };
+use crate::acquisition::StaticAcquirer;
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
 use crate::error::{InvalidQuerySnafu, Result};
-use crate::freshness::{PublicationPrecision, PublicationProvenance, PublicationTime};
+use crate::freshness::{
+    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
+};
+use crate::provider::{BoxFut, Provider, ProviderAnswer};
 use crate::query::QueryShape;
-use crate::result::ResultHit;
+use crate::result::{ResearchResult, ResultHit};
+use crate::tier::ProviderTier;
 
 const PROVIDER: &str = "semantic_scholar";
 
@@ -44,9 +52,11 @@ const JOURNAL_ARTICLE_TYPES: [&str; 2] = ["JournalArticle", "Journal Article"];
 /// A plain-text relevance search over the Academic Graph; not the bulk
 /// search endpoint, which returns an unranked listing. Requests carry no
 /// API key, so they draw on the pool shared by all unauthenticated users.
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct SemanticScholar;
+#[derive(Debug, Clone)]
+pub struct SemanticScholar {
+    acquirer: Arc<StaticAcquirer>,
+    min_interval: Duration,
+}
 
 impl SemanticScholar {
     /// Endpoint policy as documented on 2026-09-25.
@@ -78,6 +88,19 @@ impl SemanticScholar {
         language_scope: "the endpoint has no language parameter; \
             `SearchConstraints::language` is ignored",
     };
+
+    /// Search through `acquirer`, starting requests at least
+    /// `min_interval` apart. The endpoint documents no per-client rate for
+    /// unauthenticated use, so the interval is the caller's choice; the
+    /// shared pool may throttle regardless, and a `Retry-After` it sends is
+    /// honored on top.
+    #[must_use]
+    pub fn new(acquirer: Arc<StaticAcquirer>, min_interval: Duration) -> Self {
+        Self {
+            acquirer,
+            min_interval,
+        }
+    }
 
     /// Build the search request for `query`, asking for at most
     /// `constraints.max_results` papers (capped at the endpoint's 100).
@@ -138,6 +161,57 @@ impl SemanticScholar {
         collect_records(batch.data, |paper, rank| {
             paper_hit(paper, rank, accessed_at)
         })
+    }
+}
+
+impl Provider for SemanticScholar {
+    fn name(&self) -> &'static str {
+        PROVIDER
+    }
+
+    fn tier(&self) -> ProviderTier {
+        ProviderTier::Tier0Free
+    }
+
+    fn query_shapes(&self) -> &[QueryShape] {
+        Self::POLICY.query_shapes
+    }
+
+    fn publication_time_capability(&self) -> PublicationTimeCapability {
+        PublicationTimeCapability::Supported {
+            precision: PublicationPrecision::DateOnly,
+        }
+    }
+
+    fn min_request_interval(&self) -> Duration {
+        self.min_interval
+    }
+
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, Result<ResearchResult>> {
+        Box::pin(async move { self.search_with_evidence(query, constraints).await.result })
+    }
+
+    fn search_with_evidence<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, ProviderAnswer> {
+        let endpoint = Endpoint {
+            provider: PROVIDER,
+            media: MEDIA_JSON,
+            parse: Self::parse,
+        };
+        Box::pin(search_endpoint(
+            &self.acquirer,
+            endpoint,
+            Self::request(query, constraints),
+            query,
+            constraints,
+        ))
     }
 }
 

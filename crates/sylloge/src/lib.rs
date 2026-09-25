@@ -39,14 +39,24 @@
 //! merging, and the cache key.
 //!
 //! [`SemanticScholar`], [`Arxiv`], and [`Wikipedia`] are the first Tier-0
-//! cohort. Each is a pure request builder (`request`: query and
+//! cohort. Each has a pure request builder (`request`: query and
 //! [`SearchConstraints`] to a [`ProviderRequest`]) and a structured parser
 //! (`parse`: HTTP status, headers, body, and access time to a
 //! [`ParsedResponse`] of cited [`ResultHit`]s), with an [`EndpointPolicy`]
-//! recording the endpoint's documented terms. Their `Provider`
-//! implementations, and the pacing each policy records, land with the HTTP
-//! transport. All three serve one language scope and ignore
-//! [`SearchConstraints::language`] ([`EndpointPolicy::language_scope`]).
+//! recording the endpoint's documented terms. Each implements [`Provider`]
+//! over a shared [`StaticAcquirer`]: it sends only its documented anonymous
+//! request (its own `Accept` media type, a `User-Agent`, no credential),
+//! and the acquirer accepts only that media type, keeps the body as bytes
+//! without extracting text, and bounds the transfer as it does any other.
+//! [`Provider::search_with_evidence`] returns the envelope fingerprint
+//! beside the result, and the [`Router`] copies it onto the attempt's
+//! receipt ([`ProviderAttempt::evidence_fingerprints`]); the envelope and
+//! body are not kept. [`Provider::min_request_interval`] spaces a
+//! provider's attempts: arXiv's comes from its policy (3 s), Wikipedia's
+//! from its policy (300 ms), and Semantic Scholar's from the caller,
+//! because its shared anonymous pool documents no per-client rate. All
+//! three serve one language scope and ignore [`SearchConstraints::language`]
+//! ([`EndpointPolicy::language_scope`]).
 //!
 //! ## Provider response mapping
 //!
@@ -64,9 +74,19 @@
 //! | any other 5xx, and any other status | [`Error::ProviderFailure`] |
 //!
 //! The status decides: a result-shaped body under an error status is still
-//! the error. Error messages name the status and the defect and never quote
-//! free text from the response body, so upstream text cannot reach a caller
-//! through the error channel.
+//! the error, and an error status is mapped even when the acquirer refused
+//! its body (an error page in another media type). Error messages name the
+//! status and the defect and never quote free text from the response body,
+//! so upstream text cannot reach a caller through the error channel.
+//!
+//! When the acquisition itself fails, no status decides and the failure
+//! keeps its class ([`AcquisitionFailure::class`]):
+//!
+//! | Acquisition failure | Result |
+//! |---|---|
+//! | the acquisition deadline passed | [`Error::Timeout`] with that deadline |
+//! | resolution, connect, connect timeout, or an interrupted body | [`Error::TransientIo`] naming the failure kind |
+//! | a policy refusal (unsafe target, scheme, port, egress, redirect) or a limit, TLS, protocol, encoding, or media-type failure (another media type on a 200) | [`Error::PermanentIo`] naming the failure kind |
 //!
 //! ## Provider hit mapping
 //!
@@ -76,7 +96,9 @@
 //! 0.5, 0.33, ...): none of the three endpoints returns a relevance score,
 //! so rank is the only relevance signal they give. `content_type` stays
 //! `None` because the provider returned metadata about the source, not the
-//! source payload.
+//! source payload. A Wikipedia excerpt loses its search-highlight markup
+//! and then has its character references decoded, with the same decoder
+//! the static extractor uses.
 //!
 //! Metadata keys, each present only when the provider supplied the value:
 //! `doi` (a publisher DOI, lowercased, no resolver prefix), `arxiv_doi`
@@ -156,7 +178,7 @@ pub use freshness::{
 };
 pub use local_deep_research::LocalDeepResearch;
 pub use net_policy::{LocalTargetAuthorization, Resolver, SystemResolver, ValidatedTarget};
-pub use provider::{BoxFut, Provider};
+pub use provider::{BoxFut, Provider, ProviderAnswer};
 pub use providers::{
     Arxiv, EndpointPolicy, ParsedResponse, ProviderRequest, RateLimit, SemanticScholar, Wikipedia,
 };

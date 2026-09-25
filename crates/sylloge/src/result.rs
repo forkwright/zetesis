@@ -475,6 +475,13 @@ pub struct ProviderAttempt {
     pub tier: ProviderTier,
     /// What the attempt produced.
     pub outcome: AttemptOutcome,
+    /// Fingerprints of the evidence envelopes the provider's call produced
+    /// ([`crate::EvidenceEnvelope::fingerprint`]), in order: evidence
+    /// identity only, the bodies are not kept. Empty when the call made no
+    /// acquisition, was refused, or timed out. Absent in serialized form
+    /// when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_fingerprints: Vec<String>,
 }
 
 /// What one routed provider attempt produced.
@@ -838,6 +845,10 @@ mod tests {
                 class: ErrorClass::Transient,
                 message: "provider 'arxiv' rate limited: retry after None ms".to_owned(),
             },
+            evidence_fingerprints: vec![
+                "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                    .to_owned(),
+            ],
         }
     }
 
@@ -856,7 +867,10 @@ mod tests {
                         "status": "failed",
                         "class": "transient",
                         "message": "provider 'arxiv' rate limited: retry after None ms"
-                    }
+                    },
+                    "evidence_fingerprints": [
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                    ]
                 }
             }),
             "an attempt receipt omits the absent citation and tags its outcome"
@@ -871,6 +885,7 @@ mod tests {
                 ordinal: 1,
                 tier: ProviderTier::Tier0Free,
                 outcome: AttemptOutcome::TimedOut { timeout_ms: 5_000 },
+                evidence_fingerprints: Vec::new(),
             },
         );
         assert_eq!(
@@ -890,6 +905,7 @@ mod tests {
                 outcome: AttemptOutcome::Refused {
                     reason: RefusalReason::PaidRoutingUnavailable,
                 },
+                evidence_fingerprints: Vec::new(),
             },
         );
         for entry in [ProvenanceEntry::attempt("arxiv", failed_attempt()), refused] {

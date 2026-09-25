@@ -4,16 +4,18 @@
 //! hit mapping) is documented at the crate root; this module holds the
 //! pieces the three providers share.
 //!
-//! # Transport seam
+//! # Fetching
 //!
-//! The fetch between a provider's request builder and its parser belongs to
-//! the static acquisition transport, which validates the target on every
-//! hop and bounds the body. Each provider's `impl Provider` lands with that
-//! wiring: build the request, acquire it, parse the response, and return
-//! the provider's [`EndpointPolicy::query_shapes`] from
-//! `Provider::query_shapes`. Pacing belongs there too: every
-//! [`EndpointPolicy`] records the documented per-client rate limit and
-//! concurrency the wiring must hold to.
+//! Each provider's `Provider` implementation builds its documented
+//! anonymous request, fetches it through a shared
+//! [`crate::StaticAcquirer`] as a data fetch (its own `Accept` media type,
+//! the provider's `User-Agent` where its policy requires one, no
+//! credential), and hands the recorded status, `Retry-After`, and decoded
+//! body to its parser. The acquirer validates every hop, bounds the body,
+//! and accepts only the provider's media type; a data body is kept as
+//! bytes and no text is extracted from it. The envelope's fingerprint
+//! travels with the answer as the evidence behind it; the envelope and
+//! body are not kept.
 
 mod arxiv;
 mod semantic_scholar;
@@ -27,15 +29,20 @@ use jiff::civil::Date;
 use serde_json::Value;
 use url::Url;
 
+use crate::acquisition::{AcquisitionFailure, RequestProfile, StaticAcquirer};
 use crate::citation::{Citation, SourceKind};
 use crate::constraints::SearchConstraints;
+use crate::cost::{CostTracking, ProviderSpend};
 use crate::error::{
-    Error, InvalidConstraintSnafu, InvalidQuerySnafu, PermanentIoSnafu, ProviderFailureSnafu,
-    RateLimitedSnafu, Result, UnauthorizedSnafu,
+    Error, ErrorClass, InvalidConstraintSnafu, InvalidQuerySnafu, PermanentIoSnafu,
+    ProviderFailureSnafu, RateLimitedSnafu, Result, TimeoutSnafu, TransientIoSnafu,
+    UnauthorizedSnafu,
 };
+use crate::evidence::envelope::EvidenceEnvelope;
 use crate::freshness::PublicationTime;
+use crate::provider::ProviderAnswer;
 use crate::query::QueryShape;
-use crate::result::ResultHit;
+use crate::result::{ResearchResult, ResultHit};
 
 pub use arxiv::Arxiv;
 pub use semantic_scholar::SemanticScholar;
@@ -72,7 +79,7 @@ pub(crate) const META_POLICY_REVISION: &str = "provider_policy_revision";
 const ARXIV_DOI_PREFIX: &str = "10.48550/arxiv.";
 
 /// Media type the JSON endpoints answer with.
-const MEDIA_JSON: &str = "application/json";
+pub(crate) const MEDIA_JSON: &str = "application/json";
 
 const STATUS_OK: u16 = 200;
 const STATUS_BAD_REQUEST: u16 = 400;
@@ -134,13 +141,6 @@ impl EndpointPolicy {
     /// per-client rate (`window / requests`); `None` when the provider
     /// documents no per-client rate, which leaves the interval to the
     /// caller.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the transport wiring builds each provider's pacer from this interval"
-        )
-    )]
     pub(crate) fn min_interval(&self) -> Option<Duration> {
         let limit = self.rate_limit?;
         limit.window.checked_div(limit.requests)
@@ -183,6 +183,125 @@ pub struct ParsedResponse {
     pub hits: Vec<ResultHit>,
     /// Records dropped because they could not become a cited hit.
     pub malformed_records: usize,
+}
+
+/// A provider's structured parser: status, headers, body, access time.
+pub(crate) type Parse = fn(u16, &[(&str, &str)], &[u8], Timestamp) -> Result<ParsedResponse>;
+
+/// What a provider's fetch needs besides the request.
+#[derive(Clone, Copy)]
+pub(crate) struct Endpoint {
+    /// Provider identifier, for errors and the cost line.
+    pub(crate) provider: &'static str,
+    /// The data media type requested and accepted.
+    pub(crate) media: &'static str,
+    /// The provider's parser.
+    pub(crate) parse: Parse,
+}
+
+/// Build, fetch, and parse one provider search.
+///
+/// The caller's domain lists are not applied to the provider's own
+/// endpoint (see the WHY below); the network-target policy is.
+pub(crate) async fn search_endpoint(
+    acquirer: &StaticAcquirer,
+    endpoint: Endpoint,
+    request: Result<ProviderRequest>,
+    query: &str,
+    constraints: &SearchConstraints,
+) -> ProviderAnswer {
+    let fetched = async {
+        let request = request?;
+        let profile = RequestProfile::data(endpoint.media, header_value(&request, "user-agent"))?;
+        // WHY: the caller's domain allow and deny lists say which hits a
+        // search may return, so the router screens hit URLs with them. The
+        // provider's own API host is not a hit; screening it would refuse
+        // every search whose allow list names only result domains. Every
+        // other part of the network-target policy still applies to it.
+        let mut endpoint_constraints = constraints.clone();
+        endpoint_constraints.domain_allowlist = None;
+        endpoint_constraints.domain_denylist = None;
+        acquirer
+            .acquire_with(&request.url, &endpoint_constraints, None, &profile)
+            .await
+    };
+    let acquisition = match fetched.await {
+        Ok(acquisition) => acquisition,
+        Err(error) => return ProviderAnswer::from(Err(error)),
+    };
+    let envelope = acquisition.envelope();
+    let result = parse_envelope(endpoint, envelope, acquisition.body()).map(|parsed| {
+        let mut result = ResearchResult::new(
+            query,
+            QueryShape::default(),
+            parsed.hits,
+            Vec::new(),
+            CostTracking::from_line_items([ProviderSpend::new(endpoint.provider, 0, 1, 1)]),
+            "",
+        );
+        result.malformed_records = parsed.malformed_records;
+        result
+    });
+    ProviderAnswer {
+        result,
+        evidence_fingerprints: vec![envelope.fingerprint().to_owned()],
+    }
+}
+
+/// The value of request header `name`, if the request carries it.
+fn header_value<'r>(request: &'r ProviderRequest, name: &str) -> Option<&'r str> {
+    request
+        .headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// Hand a recorded response to the parser, or map the acquisition failure.
+///
+/// Whenever a response head was recorded and it is not a success, the
+/// status decides, even if the acquirer then refused the body (an error
+/// page in another media type): the parser maps the status. A failure after
+/// a successful head, or before any head, is the acquisition's own.
+fn parse_envelope(
+    endpoint: Endpoint,
+    envelope: &EvidenceEnvelope,
+    body: &[u8],
+) -> Result<ParsedResponse> {
+    let failure = envelope.failure();
+    match envelope.response() {
+        Some(response) if response.status() != STATUS_OK || failure.is_none() => {
+            let headers: Vec<(&str, &str)> = response
+                .retry_after()
+                .map(|value| ("retry-after", value))
+                .into_iter()
+                .collect();
+            (endpoint.parse)(response.status(), &headers, body, envelope.completed_at())
+        }
+        _ => Err(acquisition_error(endpoint.provider, failure)),
+    }
+}
+
+/// An acquisition failure as a provider error of the same class. Only the
+/// failure kind is named: its detail can carry text the origin sent.
+fn acquisition_error(provider: &str, failure: Option<&AcquisitionFailure>) -> Error {
+    let Some(failure) = failure else {
+        return ProviderFailureSnafu {
+            provider,
+            message: "the acquisition recorded no response",
+        }
+        .build();
+    };
+    let message = format!("{provider}: acquisition failed: {}", failure.kind());
+    match failure {
+        AcquisitionFailure::DeadlineExceeded { deadline_ms } => TimeoutSnafu {
+            provider,
+            timeout_ms: *deadline_ms,
+        }
+        .build(),
+        _ if failure.class() == ErrorClass::Transient => TransientIoSnafu { message }.build(),
+        _ => PermanentIoSnafu { message }.build(),
+    }
 }
 
 /// Values a parser gathered for one hit, before it becomes a [`ResultHit`].

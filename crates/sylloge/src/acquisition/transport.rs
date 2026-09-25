@@ -120,7 +120,8 @@ pub(crate) fn decode_failure(error: DecodeError) -> AcquisitionFailure {
 /// head.
 ///
 /// The request carries exactly `Host` (the URL host, with the port when it
-/// is not the scheme default), `User-Agent`, `Accept: */*`,
+/// is not the scheme default), `User-Agent`, `Accept` (`*/*` for a document
+/// fetch, the provider's media type for a data fetch),
 /// `Accept-Encoding: gzip, deflate` (exactly the codings [`BodyDecoder`]
 /// removes), and `Connection: close`; no cookies,
 /// credentials, `Referer`, or body.
@@ -128,9 +129,10 @@ pub(crate) async fn send_get(
     stream: Box<dyn ConnectedStream>,
     url: &Url,
     user_agent: &HeaderValue,
+    accept: &HeaderValue,
     limits: &AcquisitionLimits,
 ) -> Result<Exchange, AcquisitionFailure> {
-    let request = build_request(url, user_agent)?;
+    let request = build_request(url, user_agent, accept)?;
     let header_limit = limits.max_header_bytes();
     let (sender, conn) = http1::Builder::new()
         // WHY: title-case header names are what older origins expect; the
@@ -164,6 +166,7 @@ async fn send(
 fn build_request(
     url: &Url,
     user_agent: &HeaderValue,
+    accept: &HeaderValue,
 ) -> Result<Request<Empty<Bytes>>, AcquisitionFailure> {
     let target = match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
@@ -183,7 +186,7 @@ fn build_request(
         .uri(target)
         .header(HOST, host)
         .header(USER_AGENT, user_agent)
-        .header(ACCEPT, HeaderValue::from_static("*/*"))
+        .header(ACCEPT, accept)
         .header(
             ACCEPT_ENCODING,
             HeaderValue::from_static(decode::ACCEPT_ENCODING),
@@ -246,6 +249,7 @@ mod tests {
         let request = build_request(
             &Url::parse("http://Public.Example:8080/a/b?q=1#frag").unwrap(),
             &HeaderValue::from_static("zetesis-test"),
+            &HeaderValue::from_static("*/*"),
         )
         .unwrap();
         assert_eq!(request.uri(), "/a/b?q=1", "origin-form target, no fragment");
@@ -273,10 +277,31 @@ mod tests {
     }
 
     #[test]
+    fn build_request_sends_the_profiles_accept_and_user_agent() {
+        let request = build_request(
+            &Url::parse("https://api.example/search?q=1").unwrap(),
+            &HeaderValue::from_static("client/1.0 (https://example.org/contact)"),
+            &HeaderValue::from_static("application/json"),
+        )
+        .unwrap();
+        assert_eq!(
+            request.headers()[ACCEPT],
+            "application/json",
+            "a data fetch asks for its media type"
+        );
+        assert_eq!(
+            request.headers()[USER_AGENT],
+            "client/1.0 (https://example.org/contact)",
+            "and sends the User-Agent it was given"
+        );
+    }
+
+    #[test]
     fn build_request_omits_default_port_and_brackets_ipv6() {
         let request = build_request(
             &Url::parse("https://[2001:4860:4860::8888]:443/").unwrap(),
             &HeaderValue::from_static("zetesis-test"),
+            &HeaderValue::from_static("*/*"),
         )
         .unwrap();
         assert_eq!(

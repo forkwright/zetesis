@@ -1,8 +1,9 @@
 # Security
 
 Zetesis is pre-release. It ships a library surface (`sylloge`, re-exported by
-the `zetesis` facade) with in-memory mechanics only: no provider adapter,
-HTTP client, cache, or durable ledger exists yet. See
+the `zetesis` facade). Its only network client is `StaticAcquirer`
+(anonymous static GET), through which the Tier-0 providers (Semantic
+Scholar, arXiv, Wikipedia) fetch; no cache or durable ledger exists yet. See
 [docs/design/contract-baseline.md](docs/design/contract-baseline.md) for what
 each public type enforces today.
 

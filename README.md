@@ -4,7 +4,7 @@
 
 Sovereign research substrate: one Rust interface over research and search providers, with budget enforcement, quota accounting, cited result normalization, and bounded static acquisition. Most of that surface is still planned. The tables below separate what has landed from what has not.
 
-**Status:** pre-release (`0.0.x`). The four-crate workspace has landed. `sylloge` carries the provider, constraint, network-target, static-acquisition, citation, result, cost, budget, and deep-research lifecycle types, and `zetesis` re-exports them. The only HTTP client is `StaticAcquirer` (anonymous static GET), which returns a versioned, fingerprinted evidence envelope. No provider adapter, cache, durable ledger, model binding, or daemon exists yet. The [contract baseline](docs/design/contract-baseline.md) records what each public type enforces today and what is caller convention.
+**Status:** pre-release (`0.0.x`). The four-crate workspace has landed. `sylloge` carries the provider, constraint, network-target, static-acquisition, citation, result, cost, budget, and deep-research lifecycle types, and `zetesis` re-exports them. The only HTTP client is `StaticAcquirer` (anonymous static GET), which returns a versioned, fingerprinted evidence envelope; the Tier-0 providers (Semantic Scholar, arXiv, Wikipedia) fetch through it. No cache, durable ledger, model binding, or daemon exists yet. The [contract baseline](docs/design/contract-baseline.md) records what each public type enforces today and what is caller convention.
 **Open work:** `_llm/current_state.toml` lists the public open threads. Roadmap and blocker status are maintained outside this repository.
 
 ## Why

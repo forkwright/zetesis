@@ -8,6 +8,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::constraints::SearchConstraints;
 use crate::error::Result;
@@ -82,6 +83,13 @@ pub trait Provider: Send + Sync {
         PublicationTimeCapability::Unsupported
     }
 
+    /// Minimum spacing between this provider's requests, which the
+    /// [`crate::Router`] enforces per provider. Defaults to zero: no
+    /// spacing beyond `Retry-After`.
+    fn min_request_interval(&self) -> Duration {
+        Duration::ZERO
+    }
+
     /// Execute a search.
     ///
     /// # Errors
@@ -95,6 +103,42 @@ pub trait Provider: Send + Sync {
         query: &'a str,
         constraints: &'a SearchConstraints,
     ) -> BoxFut<'a, Result<ResearchResult>>;
+
+    /// Execute a search and report the evidence behind the answer, whether
+    /// it succeeded or failed. The [`crate::Router`] calls this and records
+    /// the evidence on the attempt receipt.
+    ///
+    /// Defaults to [`Provider::search`] with no evidence; a provider that
+    /// fetches through a [`crate::StaticAcquirer`] reports each envelope's
+    /// fingerprint.
+    fn search_with_evidence<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, ProviderAnswer> {
+        Box::pin(async move { ProviderAnswer::from(self.search(query, constraints).await) })
+    }
+}
+
+/// One provider call's answer and the evidence it gathered.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ProviderAnswer {
+    /// The search result, or the error the call ended in.
+    pub result: Result<ResearchResult>,
+    /// Fingerprints of the evidence envelopes the call produced, in order.
+    /// Evidence identity only: the envelopes and bodies are not kept.
+    pub evidence_fingerprints: Vec<String>,
+}
+
+impl From<Result<ResearchResult>> for ProviderAnswer {
+    /// An answer that gathered no evidence.
+    fn from(result: Result<ResearchResult>) -> Self {
+        Self {
+            result,
+            evidence_fingerprints: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +164,24 @@ mod tests {
         ) -> BoxFut<'a, Result<ResearchResult>> {
             Box::pin(async move { unreachable!("not exercised by this test") })
         }
+    }
+
+    #[test]
+    fn a_provider_paces_nothing_and_reports_no_evidence_by_default() {
+        assert_eq!(
+            MinimalStub.min_request_interval(),
+            Duration::ZERO,
+            "no spacing unless the provider declares one"
+        );
+        let answer = ProviderAnswer::from(Ok(ResearchResult::empty(
+            "q",
+            QueryShape::QuickFactual,
+            "k",
+        )));
+        assert!(
+            answer.evidence_fingerprints.is_empty(),
+            "an answer built from a plain result carries no evidence"
+        );
     }
 
     #[test]

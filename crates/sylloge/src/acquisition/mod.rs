@@ -75,7 +75,9 @@
 //!
 //! `GET` over HTTP/1.1 with exactly `Host`, `User-Agent` (default
 //! `zetesis/<version>`), `Accept: */*`, `Accept-Encoding: gzip, deflate`,
-//! and `Connection: close`. No cookies, credentials, `Referer`, request
+//! and `Connection: close`. A provider's data fetch inside this crate sends
+//! its own `Accept` media type, and may send its own `User-Agent`, in the
+//! same header set. No cookies, credentials, `Referer`, request
 //! body, connection pool, proxy environment variables, or automatic
 //! redirects. TLS offers only `http/1.1` through ALPN.
 //!
@@ -85,7 +87,9 @@
 //! content coding must be absent, `identity`, `gzip`, `x-gzip`, or
 //! `deflate` (one coding, never stacked), the media type must be
 //! `text/html`, `application/xhtml+xml`, or `text/plain` (a body the head
-//! declares empty needs none), and a declared `Content-Length` must fit
+//! declares empty needs none; a provider's data fetch inside this crate
+//! accepts exactly its data media type instead, keeps the body as bytes,
+//! and extracts no text), and a declared `Content-Length` must fit
 //! [`AcquisitionLimits::max_body_bytes`]. The body then streams through a
 //! decoder that stops at the first chunk crossing the wire ceiling or the
 //! decoded ceiling ([`AcquisitionLimits::max_decoded_bytes`]), so a
@@ -262,6 +266,19 @@ impl StaticAcquirer {
         constraints: &SearchConstraints,
         local: Option<&LocalTargetAuthorization>,
     ) -> Result<Acquisition> {
+        self.acquire_with(url, constraints, local, &RequestProfile::document())
+            .await
+    }
+
+    /// [`StaticAcquirer::acquire`] with the `Accept` header, `User-Agent`,
+    /// and accepted response media taken from `profile`.
+    pub(crate) async fn acquire_with(
+        &self,
+        url: &Url,
+        constraints: &SearchConstraints,
+        local: Option<&LocalTargetAuthorization>,
+        profile: &RequestProfile,
+    ) -> Result<Acquisition> {
         ensure!(
             url.as_str().len() <= self.limits.max_url_bytes(),
             InvalidConstraintSnafu {
@@ -297,8 +314,11 @@ impl StaticAcquirer {
         }
 
         let mut evidence = Evidence::new(url.clone());
-        let followed =
-            tokio::time::timeout_at(deadline, self.follow(&mut evidence, constraints, local)).await;
+        let followed = tokio::time::timeout_at(
+            deadline,
+            self.follow(&mut evidence, constraints, local, profile),
+        )
+        .await;
         let result = followed.unwrap_or_else(|_elapsed| {
             Err(AcquisitionFailure::DeadlineExceeded {
                 deadline_ms: self.limits.deadline_ms(),
@@ -314,6 +334,7 @@ impl StaticAcquirer {
         evidence: &mut Evidence,
         constraints: &SearchConstraints,
         local: Option<&LocalTargetAuthorization>,
+        profile: &RequestProfile,
     ) -> std::result::Result<Accepted, AcquisitionFailure> {
         let mut visited = HashSet::from([policy::chain_key(evidence.current.url())]);
         let mut previous: Option<Url> = None;
@@ -323,9 +344,17 @@ impl StaticAcquirer {
             let port = policy::check_hop(&url, previous.as_ref(), &self.limits)?;
             let target = self.validate(&url, port, constraints, local).await?;
             evidence.current.set_resolved(target.addrs().to_vec());
-            let exchange = self.fetch_hop(&target, port, &mut evidence.current).await?;
+            let exchange = self
+                .fetch_hop(&target, port, profile, &mut evidence.current)
+                .await?;
             let Some(location) = redirect_location(&url, &exchange)? else {
-                return accept(exchange, &self.limits, &mut evidence.response).await;
+                return accept(
+                    exchange,
+                    &self.limits,
+                    profile.media,
+                    &mut evidence.response,
+                )
+                .await;
             };
             drop(exchange);
             evidence
@@ -376,14 +405,19 @@ impl StaticAcquirer {
             Ok(accepted) => {
                 let body_record = BodyRecord::from_decoded(accepted.coding, &accepted.body);
                 let max_text = usize::try_from(self.limits.max_text_bytes()).unwrap_or(usize::MAX);
-                let (extraction, partial) = match accepted.media {
-                    Some(media) => envelope::extract(
+                let (extraction, partial) = match accepted.kind {
+                    BodyKind::Document(media) => envelope::extract(
                         media,
                         accepted.header_charset.as_deref(),
                         &accepted.body.bytes,
                         max_text,
                     ),
-                    None => (None, Some(PartialReason::EmptyBody)),
+                    // NOTE: data is evidence as bytes; there is no text to
+                    // extract, so a non-empty data body is complete.
+                    BodyKind::Data if !accepted.body.bytes.is_empty() => (None, None),
+                    BodyKind::Data | BodyKind::DeclaredEmpty => {
+                        (None, Some(PartialReason::EmptyBody))
+                    }
                 };
                 let outcome =
                     partial.map_or(Outcome::Complete, |reason| Outcome::Partial { reason });
@@ -463,6 +497,7 @@ impl StaticAcquirer {
         &self,
         target: &ValidatedTarget,
         port: u16,
+        profile: &RequestProfile,
         hop: &mut HopRecord,
     ) -> std::result::Result<Exchange, AcquisitionFailure> {
         let url = target.url();
@@ -472,7 +507,9 @@ impl StaticAcquirer {
             hop.set_tls(record);
             stream = tls_stream;
         }
-        let exchange = transport::send_get(stream, url, &self.user_agent, &self.limits).await?;
+        let user_agent = profile.user_agent.as_ref().unwrap_or(&self.user_agent);
+        let exchange =
+            transport::send_get(stream, url, user_agent, &profile.accept, &self.limits).await?;
         hop.set_status(exchange.status().as_u16());
         Ok(exchange)
     }
@@ -550,11 +587,79 @@ impl Evidence {
 /// A final response whose body was read and decoded.
 struct Accepted {
     coding: ContentCoding,
-    /// `None` when the head declared an empty body, so no media type was
-    /// required.
-    media: Option<Media>,
+    kind: BodyKind,
     header_charset: Option<String>,
     body: DecodedBody,
+}
+
+/// What an accepted body is, which decides whether text is extracted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyKind {
+    /// The head declared an empty body, so no media type was required.
+    DeclaredEmpty,
+    /// A document whose static text is extracted.
+    Document(Media),
+    /// A data body a profile asked for, kept as bytes.
+    Data,
+}
+
+/// What one acquisition asks for and accepts.
+///
+/// Not part of the envelope: the envelope records what was served
+/// ([`ResponseRecord::content_type`]), not what was asked for.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestProfile {
+    accept: HeaderValue,
+    /// Overrides the acquirer's `User-Agent` when set.
+    user_agent: Option<HeaderValue>,
+    media: AcceptedMedia,
+}
+
+/// Response media an acquisition accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcceptedMedia {
+    /// HTML, XHTML, or plain text, whose static text is extracted.
+    Documents,
+    /// Exactly this data media type (a lowercase `type/subtype` essence).
+    Data(&'static str),
+}
+
+impl RequestProfile {
+    /// A document fetch: `Accept: */*`, the acquirer's `User-Agent`, and
+    /// extractable document media only.
+    pub(crate) fn document() -> Self {
+        Self {
+            accept: HeaderValue::from_static("*/*"),
+            user_agent: None,
+            media: AcceptedMedia::Documents,
+        }
+    }
+
+    /// A data fetch that asks for and accepts only `media`, sending
+    /// `user_agent` instead of the acquirer's when given.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConstraint`] when `user_agent` is not a valid
+    /// header value.
+    pub(crate) fn data(media: &'static str, user_agent: Option<&str>) -> Result<Self> {
+        let user_agent = user_agent
+            .map(|agent| {
+                HeaderValue::from_str(agent).map_err(|source| {
+                    InvalidConstraintSnafu {
+                        field: "user_agent",
+                        reason: format!("not a valid header value: {source}"),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            accept: HeaderValue::from_static(media),
+            user_agent,
+            media: AcceptedMedia::Data(media),
+        })
+    }
 }
 
 /// The single answer resolved for this hop, handed to the policy check so
@@ -674,6 +779,7 @@ fn redirect_location(
 async fn accept(
     exchange: Exchange,
     limits: &AcquisitionLimits,
+    media: AcceptedMedia,
     recorded: &mut Option<ResponseRecord>,
 ) -> std::result::Result<Accepted, AcquisitionFailure> {
     let response = recorded.insert(ResponseRecord::from_head(
@@ -693,15 +799,16 @@ async fn accept(
             .map_err(transport::decode_failure)?;
         return Ok(Accepted {
             coding: ContentCoding::Identity,
-            media: None,
+            kind: BodyKind::DeclaredEmpty,
             header_charset: None,
             body: empty,
         });
     }
-    let Some(media) = content_type
-        .as_ref()
-        .and_then(|ct| Media::from_essence(&ct.essence))
-    else {
+    let kind = content_type.as_ref().and_then(|ct| match media {
+        AcceptedMedia::Documents => Media::from_essence(&ct.essence).map(BodyKind::Document),
+        AcceptedMedia::Data(essence) => (ct.essence == essence).then_some(BodyKind::Data),
+    });
+    let Some(kind) = kind else {
         return Err(AcquisitionFailure::UnsupportedContentType {
             media_type: content_type.map(|ct| ct.essence),
         });
@@ -715,7 +822,7 @@ async fn accept(
     let body = exchange.read_body(decoder).await?;
     Ok(Accepted {
         coding,
-        media: Some(media),
+        kind,
         header_charset: content_type.and_then(|ct| ct.charset),
         body,
     })
@@ -771,6 +878,159 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// Accept one connection, answer with `response`, and return the
+    /// request head.
+    async fn answer_with(listener: &TcpListener, response: &[u8]) -> String {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap() > 0 {
+            head.push(byte[0]);
+        }
+        stream.write_all(response).await.unwrap();
+        String::from_utf8(head).unwrap()
+    }
+
+    /// Fetch a loopback origin answering `response` under `profile`.
+    async fn fetch(profile: &RequestProfile, response: &[u8]) -> (Acquisition, String) {
+        let (local, listener) = loopback_origin().await;
+        let url = Url::parse(&format!("http://{local}/search?q=1")).unwrap();
+        let authority = LocalTargetAuthorization::for_crate_tests();
+        let fetcher = acquirer();
+        let constraints = SearchConstraints::default();
+        let (acquired, head) = tokio::join!(
+            fetcher.acquire_with(&url, &constraints, Some(&authority), profile),
+            answer_with(&listener, response),
+        );
+        (acquired.unwrap(), head)
+    }
+
+    fn json_profile() -> RequestProfile {
+        RequestProfile::data("application/json", None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_data_profile_keeps_its_media_as_bytes_without_extraction() {
+        let (acquired, head) = fetch(
+            &json_profile(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\
+              Content-Length: 11\r\n\r\n{\"pages\":1}",
+        )
+        .await;
+        let envelope = acquired.envelope();
+        assert_eq!(
+            envelope.outcome(),
+            &Outcome::Complete,
+            "data is complete as bytes"
+        );
+        assert!(
+            envelope.extraction().is_none(),
+            "no text is extracted from data"
+        );
+        assert_eq!(
+            acquired.body(),
+            b"{\"pages\":1}".as_slice(),
+            "the body is kept"
+        );
+        assert_eq!(
+            envelope::replay(envelope, acquired.body()),
+            envelope::ReplayOutcome::NothingToReplay,
+            "with no extraction there is no transformation to replay"
+        );
+        let wire = serde_json::to_string(envelope).unwrap();
+        let decoded: envelope::EvidenceEnvelope = serde_json::from_str(&wire).unwrap();
+        assert_eq!(
+            &decoded, envelope,
+            "a data envelope is a valid v1 record and round-trips unchanged"
+        );
+        assert!(
+            head.contains("\r\nAccept: application/json\r\n"),
+            "the fetch asks for its media type: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_profile_refuses_any_other_media_type() {
+        let (acquired, _) = fetch(
+            &json_profile(),
+            b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/html\r\n\
+              Retry-After: 30\r\nContent-Length: 4\r\n\r\nslow",
+        )
+        .await;
+        let envelope = acquired.envelope();
+        assert_eq!(
+            envelope.failure(),
+            Some(&AcquisitionFailure::UnsupportedContentType {
+                media_type: Some("text/html".to_owned())
+            }),
+            "an HTML error page is not the JSON the profile accepts"
+        );
+        let response = envelope.response().unwrap();
+        assert_eq!(response.status(), 429, "the status is still recorded");
+        assert_eq!(response.retry_after(), Some("30"), "and so is Retry-After");
+    }
+
+    #[tokio::test]
+    async fn a_document_fetch_still_refuses_data_media() {
+        let (acquired, head) = fetch(
+            &RequestProfile::document(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+              Content-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert_eq!(
+            acquired.envelope().failure(),
+            Some(&AcquisitionFailure::UnsupportedContentType {
+                media_type: Some("application/json".to_owned())
+            }),
+            "`acquire` keeps accepting only extractable documents"
+        );
+        assert!(
+            head.contains("\r\nAccept: */*\r\n"),
+            "and keeps asking for anything: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_data_body_is_partial() {
+        let (acquired, _) = fetch(
+            &json_profile(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+              Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_eq!(
+            acquired.envelope().outcome(),
+            &Outcome::Partial {
+                reason: PartialReason::EmptyBody
+            },
+            "an empty data body is evidence of nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_profile_sends_its_own_user_agent() {
+        let profile = RequestProfile::data(
+            "application/json",
+            Some("client/1.0 (https://example.org/contact)"),
+        )
+        .unwrap();
+        let (_, head) = fetch(
+            &profile,
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+              Content-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert!(
+            head.contains("\r\nUser-Agent: client/1.0 (https://example.org/contact)\r\n"),
+            "the profile's User-Agent replaces the acquirer's: {head}"
+        );
+        assert!(
+            RequestProfile::data("application/json", Some("bad\nagent")).is_err(),
+            "a User-Agent that is not a header value is refused"
+        );
     }
 
     #[tokio::test]

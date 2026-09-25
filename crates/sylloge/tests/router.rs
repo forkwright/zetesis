@@ -1211,15 +1211,27 @@ struct Scripted {
     shapes: &'static [QueryShape],
     steps: std::sync::Mutex<std::collections::VecDeque<Step>>,
     calls: AtomicUsize,
+    min_interval: Duration,
 }
 
 impl Scripted {
     fn new(name: &'static str, shapes: &'static [QueryShape], steps: Vec<Step>) -> Arc<Self> {
+        Self::paced(name, shapes, steps, Duration::ZERO)
+    }
+
+    /// A scripted provider that declares `min_interval` between requests.
+    fn paced(
+        name: &'static str,
+        shapes: &'static [QueryShape],
+        steps: Vec<Step>,
+        min_interval: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             name,
             shapes,
             steps: std::sync::Mutex::new(steps.into()),
             calls: AtomicUsize::new(0),
+            min_interval,
         })
     }
 
@@ -1239,6 +1251,10 @@ impl Provider for Scripted {
 
     fn query_shapes(&self) -> &[QueryShape] {
         self.shapes
+    }
+
+    fn min_request_interval(&self) -> Duration {
+        self.min_interval
     }
 
     fn search<'a>(
@@ -1306,6 +1322,55 @@ fn rate_limited_for_60s() -> Reply {
 }
 
 const DISCOVERY: &[QueryShape] = &[QueryShape::SemanticDiscovery];
+
+#[tokio::test(start_paused = true)]
+async fn a_providers_declared_interval_spaces_its_attempts() {
+    let provider = Scripted::paced(
+        "arxiv",
+        DISCOVERY,
+        vec![
+            step(
+                0,
+                Reply::Hits(vec![web_hit("First", "https://example.org/1")]),
+            ),
+            step(
+                0,
+                Reply::Hits(vec![web_hit("Second", "https://example.org/2")]),
+            ),
+        ],
+        Duration::from_secs(3),
+    );
+    let router = scripted_router(&[Arc::clone(&provider)], ATTEMPT_TIMEOUT);
+    let start = tokio::time::Instant::now();
+    let first = search(
+        &router,
+        QueryShape::SemanticDiscovery,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::ZERO,
+        "the first attempt starts at once"
+    );
+    let second = search(
+        &router,
+        QueryShape::SemanticDiscovery,
+        &SearchConstraints::default(),
+    )
+    .await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(3),
+        "the next attempt waits out the provider's declared interval"
+    );
+    assert_eq!(
+        (titles(&first), titles(&second)),
+        (vec!["First"], vec!["Second"]),
+        "both attempts are answered in order"
+    );
+    assert_eq!(provider.calls(), 2, "one call per attempt");
+}
 
 #[tokio::test(start_paused = true)]
 async fn a_retry_after_holds_the_next_attempt_to_that_provider() {

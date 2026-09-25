@@ -14,14 +14,14 @@ pub use sylloge::{
     FreshnessBasis, FreshnessDecision, FreshnessPolicy, HopRecord, InvalidConstraintSnafu,
     InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization, Media, MissingCitationsSnafu,
     OfflineFixture, Outcome, OversizedPayloadSnafu, ParsedResponse, PartialReason,
-    PermanentIoSnafu, Producer, ProvenanceEntry, Provider, ProviderAttempt, ProviderFailureSnafu,
-    ProviderId, ProviderRequest, ProviderSpend, ProviderTier, PublicationPrecision,
-    PublicationProvenance, PublicationTime, PublicationTimeCapability, QueryGenerator, QueryShape,
-    QuotaExhaustedSnafu, RateLimit, RateLimitedSnafu, RefusalReason, ReplayOutcome, ResearchResult,
-    ResearchStatus, Resolver, ResponseRecord, Result, ResultHit, Router, SchemePolicy,
-    SearchConstraints, Segment, SemanticScholar, SourceKind, SourceRetriever, SpendEvent,
-    SpendLedger, StaticAcquirer, StaticAcquirerBuilder, Synthesizer, SystemResolver, TaskId,
-    TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TlsRecord, TransientIoSnafu,
+    PermanentIoSnafu, Producer, ProvenanceEntry, Provider, ProviderAnswer, ProviderAttempt,
+    ProviderFailureSnafu, ProviderId, ProviderRequest, ProviderSpend, ProviderTier,
+    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
+    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimit, RateLimitedSnafu, RefusalReason,
+    ReplayOutcome, ResearchResult, ResearchStatus, Resolver, ResponseRecord, Result, ResultHit,
+    Router, SchemePolicy, SearchConstraints, Segment, SemanticScholar, SourceKind, SourceRetriever,
+    SpendEvent, SpendLedger, StaticAcquirer, StaticAcquirerBuilder, Synthesizer, SystemResolver,
+    TaskId, TaskNotReadySnafu, TaskUnavailableSnafu, TimeoutSnafu, TlsRecord, TransientIoSnafu,
     TrustAnchors, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu, ValidatedTarget,
     Wikipedia, evaluate_freshness, replay,
 };
@@ -177,20 +177,53 @@ mod tests {
         );
     }
 
+    /// An acquirer the cohort checks never fetch through; building one
+    /// needs a trust anchor, so any self-signed certificate will do.
+    fn offline_acquirer() -> std::sync::Arc<StaticAcquirer> {
+        let anchor = rcgen::generate_simple_self_signed(vec!["unused.example".to_owned()]).unwrap();
+        let limits = AcquisitionLimits::new(
+            SchemePolicy::HttpsOnly,
+            0,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
+            1024 * 1024,
+        )
+        .unwrap();
+        let trust = TrustAnchors::from_der([anchor.cert.der().as_ref()]).unwrap();
+        std::sync::Arc::new(StaticAcquirer::builder(limits, trust).build().unwrap())
+    }
+
     #[test]
-    fn provider_cohort_and_router_are_reachable_through_facade() {
-        // WHY: the router, the first provider cohort, and the attempt
-        // receipt types are consumer-facing; exercise each through the
-        // facade path rather than only asserting the `pub use` compiles.
+    fn provider_cohort_is_reachable_through_facade() {
+        // WHY: the first provider cohort is consumer-facing; exercise each
+        // provider through the facade path rather than only asserting the
+        // `pub use` compiles.
         let constraints = SearchConstraints::new(3, BudgetConstraint::free_only());
+        let acquirer = offline_acquirer();
+        let wikipedia = Wikipedia::new(
+            std::sync::Arc::clone(&acquirer),
+            "facade-check/0.0 (https://example.org/contact)",
+        )
+        .unwrap();
         let requests: [ProviderRequest; 3] = [
             SemanticScholar::request("q", &constraints).unwrap(),
             Arxiv::request("q", &constraints).unwrap(),
-            Wikipedia::new("facade-check/0.0 (https://example.org/contact)")
-                .unwrap()
-                .request("q", &constraints)
-                .unwrap(),
+            wikipedia.request("q", &constraints).unwrap(),
         ];
+        let cohort: [&dyn Provider; 3] = [
+            &SemanticScholar::new(std::sync::Arc::clone(&acquirer), std::time::Duration::ZERO),
+            &Arxiv::new(acquirer),
+            &wikipedia,
+        ];
+        assert_eq!(
+            cohort.map(Provider::min_request_interval),
+            [
+                std::time::Duration::ZERO,
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_millis(300),
+            ],
+            "each provider paces at its policy's interval, Semantic Scholar at the caller's"
+        );
         assert!(
             requests.iter().all(|r| r.url.scheme() == "https"),
             "every cohort endpoint is https"
@@ -215,10 +248,20 @@ mod tests {
             parsed.hits.is_empty() && parsed.malformed_records == 0,
             "an empty page list parses through the facade"
         );
+    }
+
+    #[test]
+    fn router_and_receipts_are_reachable_through_facade() {
+        let empty = ResearchResult::empty("q", QueryShape::QuickFactual, "k");
         assert_eq!(
-            ResearchResult::empty("q", QueryShape::QuickFactual, "k").evidence_state(),
+            empty.evidence_state(),
             EvidenceState::Unanswered,
             "evidence state is reachable through the facade"
+        );
+        let answer = ProviderAnswer::from(Ok(empty));
+        assert!(
+            answer.evidence_fingerprints.is_empty(),
+            "a provider answer is reachable through the facade"
         );
 
         let router = Router::new(Vec::new(), std::time::Duration::from_secs(30)).unwrap();
@@ -238,6 +281,10 @@ mod tests {
                 reason: RefusalReason::PaidRoutingUnavailable
             },
             "receipt types decode through the facade"
+        );
+        assert!(
+            attempt.evidence_fingerprints.is_empty(),
+            "a receipt without evidence decodes with none"
         );
     }
 

@@ -1,5 +1,6 @@
 //! English Wikipedia page search through the per-wiki `MediaWiki` REST API.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -8,16 +9,20 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    EndpointPolicy, HitParts, META_PAGEID, ParsedResponse, ProviderRequest, RateLimit, accept_json,
-    bounded_detail, check_status, collapse_whitespace, collect_records, endpoint_url, malformed,
-    required, result_limit, validated_query,
+    Endpoint, EndpointPolicy, HitParts, MEDIA_JSON, META_PAGEID, ParsedResponse, ProviderRequest,
+    RateLimit, accept_json, bounded_detail, check_status, collapse_whitespace, collect_records,
+    endpoint_url, malformed, required, result_limit, search_endpoint, validated_query,
 };
+use crate::acquisition::StaticAcquirer;
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
 use crate::error::{InvalidConstraintSnafu, Result};
+use crate::evidence::html_text::decode_references;
 use crate::freshness::PublicationTime;
+use crate::provider::{BoxFut, Provider, ProviderAnswer};
 use crate::query::QueryShape;
-use crate::result::ResultHit;
+use crate::result::{ResearchResult, ResultHit};
+use crate::tier::ProviderTier;
 
 const PROVIDER: &str = "wikipedia";
 
@@ -46,8 +51,9 @@ const SPAN_CLOSE: &str = "</span>";
 /// Wikimedia's User-Agent policy requires an informative User-Agent with
 /// contact information and answers generic ones with HTTP 403, so the
 /// caller supplies it: zetesis never invents contact details.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Wikipedia {
+    acquirer: Arc<StaticAcquirer>,
     user_agent: String,
 }
 
@@ -83,9 +89,11 @@ impl Wikipedia {
             not mapped to another language edition",
     };
 
-    /// Configure the provider with the caller's User-Agent, in the form the
-    /// Wikimedia policy asks for:
+    /// Search through `acquirer`, sending the caller's User-Agent (in place
+    /// of the acquirer's) in the form the Wikimedia policy asks for:
     /// `<client>/<version> (<contact information>) <library>/<version>`.
+    /// Requests start at least 300 ms apart, the documented rate
+    /// ([`EndpointPolicy::rate_limit`]).
     ///
     /// # Errors
     ///
@@ -94,25 +102,13 @@ impl Wikipedia {
     /// that cannot appear in a header value (anything outside printable
     /// ASCII). Whether it names real contact information is the caller's
     /// responsibility.
-    pub fn new(user_agent: impl Into<String>) -> Result<Self> {
+    pub fn new(acquirer: Arc<StaticAcquirer>, user_agent: impl Into<String>) -> Result<Self> {
         let user_agent = user_agent.into();
-        let reason = if user_agent.trim().is_empty() {
-            Some("is blank")
-        } else if user_agent.trim() != user_agent {
-            Some("has leading or trailing whitespace")
-        } else if !user_agent.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
-            Some("holds a character outside printable ASCII")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            return Err(InvalidConstraintSnafu {
-                field: "user_agent",
-                reason,
-            }
-            .build());
-        }
-        Ok(Self { user_agent })
+        check_user_agent(&user_agent)?;
+        Ok(Self {
+            acquirer,
+            user_agent,
+        })
     }
 
     /// Build the search request for `query`, asking for at most
@@ -142,7 +138,10 @@ impl Wikipedia {
     /// Unknown fields are ignored and optional fields may be absent or
     /// null. A page without `id`, `key`, or `title` is dropped and counted
     /// in [`ParsedResponse::malformed_records`]. The endpoint reports no
-    /// timestamps, so every citation's publication time is `Unknown`.
+    /// timestamps, so every citation's publication time is `Unknown`. The
+    /// snippet is the excerpt with its search-highlight markup removed,
+    /// then its character references decoded, then its whitespace
+    /// collapsed; a decoded `<` is text, never markup.
     ///
     /// # Errors
     ///
@@ -161,6 +160,72 @@ impl Wikipedia {
         collect_records(response.pages, |page, rank| {
             page_hit(page, rank, accessed_at)
         })
+    }
+}
+
+impl Provider for Wikipedia {
+    fn name(&self) -> &'static str {
+        PROVIDER
+    }
+
+    fn tier(&self) -> ProviderTier {
+        ProviderTier::Tier0Free
+    }
+
+    fn query_shapes(&self) -> &[QueryShape] {
+        Self::POLICY.query_shapes
+    }
+
+    fn min_request_interval(&self) -> Duration {
+        Self::POLICY.min_interval().unwrap_or(Duration::ZERO)
+    }
+
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, Result<ResearchResult>> {
+        Box::pin(async move { self.search_with_evidence(query, constraints).await.result })
+    }
+
+    fn search_with_evidence<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, ProviderAnswer> {
+        let endpoint = Endpoint {
+            provider: PROVIDER,
+            media: MEDIA_JSON,
+            parse: Self::parse,
+        };
+        Box::pin(search_endpoint(
+            &self.acquirer,
+            endpoint,
+            self.request(query, constraints),
+            query,
+            constraints,
+        ))
+    }
+}
+
+/// Refuse a User-Agent that is blank, padded, or not a header value.
+fn check_user_agent(user_agent: &str) -> Result<()> {
+    let reason = if user_agent.trim().is_empty() {
+        Some("is blank")
+    } else if user_agent.trim() != user_agent {
+        Some("has leading or trailing whitespace")
+    } else if !user_agent.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        Some("holds a character outside printable ASCII")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(InvalidConstraintSnafu {
+            field: "user_agent",
+            reason,
+        }
+        .build()),
+        None => Ok(()),
     }
 }
 
@@ -208,7 +273,7 @@ fn page_hit(page: Page, rank: usize, accessed_at: Timestamp) -> Result<Option<Re
         title,
         snippet: page
             .excerpt
-            .map(|e| collapse_whitespace(&strip_searchmatch(&e)))
+            .map(|e| collapse_whitespace(&decode_references(&strip_searchmatch(&e))))
             .unwrap_or_default(),
         url,
         published_at: PublicationTime::Unknown,
@@ -233,7 +298,9 @@ fn article_url(key: &str) -> Result<Url> {
 }
 
 /// Remove the search-highlight spans from an excerpt and keep everything
-/// else, text and any other markup, exactly as delivered.
+/// else, text and any other markup, exactly as delivered. Character
+/// references are decoded afterwards, so a decoded `&lt;span` is text,
+/// never a tag.
 ///
 /// A `</span>` is removed only when it closes a highlight span; other spans
 /// keep both tags. An excerpt cut off inside a highlight simply loses the
@@ -321,14 +388,15 @@ mod tests {
     #[test]
     fn user_agent_must_be_a_usable_header_value() {
         for bad in ["", "   ", " padded/1.0", "line\nbreak/1.0", "caf\u{e9}/1.0"] {
-            let err = Wikipedia::new(bad).unwrap_err();
+            let err = check_user_agent(bad).unwrap_err();
             assert!(
                 matches!(err, crate::Error::InvalidConstraint { .. }),
                 "{bad:?} must be refused, got {err:?}"
             );
         }
         assert!(
-            Wikipedia::new("example-client/1.0 (https://example.org/contact) sylloge/0.0").is_ok(),
+            check_user_agent("example-client/1.0 (https://example.org/contact) sylloge/0.0")
+                .is_ok(),
             "a policy-shaped User-Agent is accepted"
         );
     }

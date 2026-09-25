@@ -1,5 +1,8 @@
 //! arXiv query API (`GET /api/query`), answered as an Atom 1.0 feed.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use jiff::Timestamp;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::name::ResolveResult;
@@ -8,19 +11,28 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    DoiIdentity, EndpointPolicy, HitParts, META_ARXIV_DOI, META_ARXIV_ID, META_ARXIV_VERSION,
-    META_AUTHORS, META_DOI, META_YEAR, ParsedResponse, ProviderRequest, RateLimit, bounded_detail,
-    check_status, classify_doi, collapse_whitespace, collect_records, endpoint_url, malformed,
-    normalize_arxiv_id, required, result_limit, validated_query,
+    DoiIdentity, Endpoint, EndpointPolicy, HitParts, META_ARXIV_DOI, META_ARXIV_ID,
+    META_ARXIV_VERSION, META_AUTHORS, META_DOI, META_YEAR, ParsedResponse, ProviderRequest,
+    RateLimit, bounded_detail, check_status, classify_doi, collapse_whitespace, collect_records,
+    endpoint_url, malformed, normalize_arxiv_id, required, result_limit, search_endpoint,
+    validated_query,
 };
+use crate::acquisition::StaticAcquirer;
 use crate::citation::SourceKind;
 use crate::constraints::SearchConstraints;
 use crate::error::{Error, InvalidQuerySnafu, Result};
-use crate::freshness::{PublicationPrecision, PublicationProvenance, PublicationTime};
+use crate::freshness::{
+    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
+};
+use crate::provider::{BoxFut, Provider, ProviderAnswer};
 use crate::query::QueryShape;
-use crate::result::ResultHit;
+use crate::result::{ResearchResult, ResultHit};
+use crate::tier::ProviderTier;
 
 const PROVIDER: &str = "arxiv";
+
+/// Media type the query API answers with.
+const MEDIA_ATOM: &str = "application/atom+xml";
 
 /// Documented largest slice per request ("slices of at most 2000").
 const MAX_RESULTS: usize = 2_000;
@@ -47,9 +59,10 @@ const YEAR_DIGITS: usize = 4;
 ///
 /// Every query term is searched in all fields (`all:`) and the terms are
 /// combined with `AND`, results in the API's relevance order.
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct Arxiv;
+#[derive(Debug, Clone)]
+pub struct Arxiv {
+    acquirer: Arc<StaticAcquirer>,
+}
 
 impl Arxiv {
     /// Endpoint policy as documented on 2026-09-25.
@@ -78,6 +91,13 @@ impl Arxiv {
         language_scope: "the query API has no language parameter; \
             `SearchConstraints::language` is ignored",
     };
+
+    /// Search through `acquirer`. Requests start at least three seconds
+    /// apart, the documented rate ([`EndpointPolicy::rate_limit`]).
+    #[must_use]
+    pub fn new(acquirer: Arc<StaticAcquirer>) -> Self {
+        Self { acquirer }
+    }
 
     /// Build the query request for `query`, asking for at most
     /// `constraints.max_results` entries (capped at the documented 2000).
@@ -116,7 +136,7 @@ impl Arxiv {
             .append_pair("sortOrder", "descending");
         Ok(ProviderRequest {
             url,
-            headers: vec![("accept", "application/atom+xml".to_owned())],
+            headers: vec![("accept", MEDIA_ATOM.to_owned())],
         })
     }
 
@@ -152,6 +172,57 @@ impl Arxiv {
             .build());
         }
         collect_records(entries, |entry, rank| entry_hit(entry, rank, accessed_at))
+    }
+}
+
+impl Provider for Arxiv {
+    fn name(&self) -> &'static str {
+        PROVIDER
+    }
+
+    fn tier(&self) -> ProviderTier {
+        ProviderTier::Tier0Free
+    }
+
+    fn query_shapes(&self) -> &[QueryShape] {
+        Self::POLICY.query_shapes
+    }
+
+    fn publication_time_capability(&self) -> PublicationTimeCapability {
+        PublicationTimeCapability::Supported {
+            precision: PublicationPrecision::Exact,
+        }
+    }
+
+    fn min_request_interval(&self) -> Duration {
+        Self::POLICY.min_interval().unwrap_or(Duration::ZERO)
+    }
+
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, Result<ResearchResult>> {
+        Box::pin(async move { self.search_with_evidence(query, constraints).await.result })
+    }
+
+    fn search_with_evidence<'a>(
+        &'a self,
+        query: &'a str,
+        constraints: &'a SearchConstraints,
+    ) -> BoxFut<'a, ProviderAnswer> {
+        let endpoint = Endpoint {
+            provider: PROVIDER,
+            media: MEDIA_ATOM,
+            parse: Self::parse,
+        };
+        Box::pin(search_endpoint(
+            &self.acquirer,
+            endpoint,
+            Self::request(query, constraints),
+            query,
+            constraints,
+        ))
     }
 }
 

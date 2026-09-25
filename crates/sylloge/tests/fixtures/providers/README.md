@@ -1,8 +1,9 @@
 # Provider response fixtures
 
 Response bodies for the parser tests in `crates/sylloge/tests/provider_*.rs`
-and the router tests in `crates/sylloge/tests/router.rs`. Every file is one
-of three kinds:
+and the router tests in `crates/sylloge/tests/router.rs`; the wiring tests
+in `crates/sylloge/tests/provider_wiring.rs` serve some of them from local
+TLS origins. Every file is one of three kinds:
 
 - **recorded**: a live response body, stored byte for byte as received;
 - **documented shape**: invented content laid out in the structure the
@@ -15,8 +16,9 @@ title is invented for the fixture.
 
 Status-only conditions (rate limiting, authentication denial, server
 errors) are tested by status and headers; the tests pair them with a body
-that would otherwise parse, to show the status decides. Timeouts belong to
-the transport and are not fixtures here.
+that would otherwise parse, to show the status decides. Timeouts and
+transport failures are not fixtures here: `provider_wiring.rs` stages them
+with the offline origins and connectors in `crates/sylloge/tests/fixture/`.
 
 ## semantic_scholar
 
