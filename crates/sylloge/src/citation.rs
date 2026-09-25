@@ -93,8 +93,8 @@ impl SourceKind {
 /// score is the provider's own relevance score normalized to `0.0..=1.0`
 /// (providers that do not surface scores must supply `1.0` for hits they
 /// consider primary and `0.5` or lower for supplemental material). The
-/// `content_type` captures the MIME of the fetched payload so the crawler
-/// layer (future phase) can decide whether to run HTML extraction, PDF
+/// `content_type` captures the MIME of the fetched payload so the
+/// acquisition layer can decide whether to run HTML extraction, PDF
 /// parsing, or raw text handling.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]

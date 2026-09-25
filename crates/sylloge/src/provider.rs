@@ -15,7 +15,7 @@ use crate::freshness::PublicationTimeCapability;
 use crate::{ProviderTier, ResearchResult};
 
 /// `Send`-bounded boxed future returned by every async method on the
-/// [`Provider`], [`crate::DeepResearch`], and [`crate::Crawler`] traits.
+/// [`Provider`], [`crate::DeepResearch`], and [`crate::Connector`] traits.
 ///
 /// WHY: native `async fn` in traits is not dyn-compatible, and the router
 /// stores backends as `Arc<dyn Provider>` / `Box<dyn DeepResearch>`.

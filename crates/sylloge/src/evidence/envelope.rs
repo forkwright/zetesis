@@ -8,12 +8,17 @@
 //! envelope in [`Acquisition`] so the consumer keeps them in its own custody,
 //! keyed by [`BodyRecord::decoded_sha256`].
 //!
-//! Schema evolution: producers emit only [`SCHEMA_VERSION`]; decoding
+//! The envelope records full URLs, including query strings, exactly as
+//! requested and followed (userinfo is never recorded). Whether a query
+//! string is sensitive is the consumer's policy: it decides where the
+//! envelope is stored and who may read it.
+//!
+//! Schema evolution: producers emit only [`EVIDENCE_SCHEMA_VERSION`]; decoding
 //! accepts exactly that version and refuses any other with a typed message,
 //! so a reader never silently misreads a record it does not understand. A
 //! new or changed field is a new schema version. The extractor carries its
-//! own version: changed extraction output bumps
-//! [`html_text::EXTRACTOR_VERSION`], not the schema.
+//! own version: changed extraction output bumps the extractor version in
+//! [`ExtractorId`], not the schema.
 //!
 //! Decoding also recomputes the fingerprint and refuses a record whose
 //! stored fingerprint disagrees, so an envelope altered after it was
@@ -21,20 +26,21 @@
 
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 use url::Url;
 
-use super::decode::{ContentCoding, hex};
+use super::decode::{ContentCoding, DecodedBody};
 use super::html_text::{self, Segment};
-use super::media::{Charset, Media};
+use super::media::{Charset, ContentType, Media};
 use crate::acquisition::{AcquisitionFailure, AcquisitionLimits, HopRecord, ResponseRecord};
+use crate::digest::{Sha256, sha256_hex};
 use crate::error::ErrorClass;
 
-/// Stable identifier of this record type.
-pub const SCHEMA_ID: &str = "zetesis.static_acquisition";
+/// Stable identifier of the evidence envelope record type.
+pub const EVIDENCE_SCHEMA_ID: &str = "zetesis.static_acquisition";
 
-/// The only schema version this producer emits and decodes.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The only evidence envelope schema version this producer emits and
+/// decodes.
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 
 /// The package and version that produced an envelope. The consumer attaches
 /// the pinned commit it built from; a crate cannot know its own commit.
@@ -73,6 +79,18 @@ pub struct BodyRecord {
     pub decoded_sha256: String,
 }
 
+impl BodyRecord {
+    pub(crate) fn from_decoded(coding: ContentCoding, body: &DecodedBody) -> Self {
+        Self {
+            coding,
+            wire_bytes: body.wire_bytes,
+            wire_sha256: body.wire_sha256.clone(),
+            decoded_bytes: u64::try_from(body.bytes.len()).unwrap_or(u64::MAX),
+            decoded_sha256: body.decoded_sha256.clone(),
+        }
+    }
+}
+
 /// Extractor identity recorded with every extraction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,7 +102,9 @@ pub struct ExtractorId {
 }
 
 impl ExtractorId {
-    fn current() -> Self {
+    /// The extractor this build runs.
+    #[must_use]
+    pub fn current() -> Self {
         Self {
             id: html_text::EXTRACTOR_ID.to_owned(),
             version: html_text::EXTRACTOR_VERSION,
@@ -140,7 +160,7 @@ pub enum PartialReason {
 }
 
 impl PartialReason {
-    /// Stable snake_case identifier, equal to the serialized `reason` tag.
+    /// Stable `snake_case` identifier, equal to the serialized `reason` tag.
     #[must_use]
     pub const fn kind(&self) -> &'static str {
         match self {
@@ -233,7 +253,7 @@ pub(crate) struct EnvelopeParts {
 impl EvidenceEnvelope {
     pub(crate) fn seal(parts: EnvelopeParts) -> Self {
         let fingerprint = fingerprint(
-            SCHEMA_VERSION,
+            EVIDENCE_SCHEMA_VERSION,
             &parts.requested_url,
             parts.final_url.as_ref(),
             parts.body.as_ref(),
@@ -241,8 +261,8 @@ impl EvidenceEnvelope {
             &parts.outcome,
         );
         Self {
-            schema: SCHEMA_ID.to_owned(),
-            schema_version: SCHEMA_VERSION,
+            schema: EVIDENCE_SCHEMA_ID.to_owned(),
+            schema_version: EVIDENCE_SCHEMA_VERSION,
             producer: Producer::current(),
             requested_url: parts.requested_url,
             final_url: parts.final_url,
@@ -330,6 +350,15 @@ impl EvidenceEnvelope {
         &self.outcome
     }
 
+    /// The failure, when the acquisition stopped.
+    #[must_use]
+    pub const fn failure(&self) -> Option<&AcquisitionFailure> {
+        match &self.outcome {
+            Outcome::Failed { failure } => Some(failure),
+            Outcome::Complete | Outcome::Partial { .. } => None,
+        }
+    }
+
     /// `sha256:<hex>` over the content and transformation identity (see
     /// [`fingerprint`]).
     #[must_use]
@@ -357,7 +386,7 @@ fn fingerprint(
     let version = schema_version.to_string();
     let extractor_version = extraction.map(|e| e.extractor.version.to_string());
     let fields: [&str; 9] = [
-        SCHEMA_ID,
+        EVIDENCE_SCHEMA_ID,
         &version,
         requested_url.as_str(),
         final_url.map_or("", Url::as_str),
@@ -370,10 +399,10 @@ fn fingerprint(
     let mut hash = Sha256::new();
     for field in fields {
         let len = u64::try_from(field.len()).unwrap_or(u64::MAX);
-        hash.update(len.to_be_bytes());
+        hash.update(&len.to_be_bytes());
         hash.update(field.as_bytes());
     }
-    format!("sha256:{}", hex(&hash.finalize()))
+    format!("sha256:{}", hash.finish_hex())
 }
 
 #[derive(Deserialize)]
@@ -404,15 +433,17 @@ impl<'de> Deserialize<'de> for EvidenceEnvelope {
         // a newer or foreign record must be refused, not partially read.
         let value = serde_json::Value::deserialize(deserializer)?;
         let schema = value.get("schema").and_then(serde_json::Value::as_str);
-        if schema != Some(SCHEMA_ID) {
+        if schema != Some(EVIDENCE_SCHEMA_ID) {
             return Err(serde::de::Error::custom(format!(
-                "not a {SCHEMA_ID} record (schema {schema:?})"
+                "not a {EVIDENCE_SCHEMA_ID} record (schema {schema:?})"
             )));
         }
-        let version = value.get("schema_version").and_then(serde_json::Value::as_u64);
-        if version != Some(u64::from(SCHEMA_VERSION)) {
+        let version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64);
+        if version != Some(u64::from(EVIDENCE_SCHEMA_VERSION)) {
             return Err(serde::de::Error::custom(format!(
-                "unsupported {SCHEMA_ID} schema_version {version:?}; this reader supports {SCHEMA_VERSION}"
+                "unsupported {EVIDENCE_SCHEMA_ID} schema_version {version:?}; this reader supports {EVIDENCE_SCHEMA_VERSION}"
             )));
         }
         let wire: EnvelopeWire = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -448,16 +479,48 @@ impl<'de> Deserialize<'de> for EvidenceEnvelope {
     }
 }
 
-/// One acquisition: the envelope to persist verbatim and the decoded body
-/// bytes for the consumer's own custody (keyed by
-/// [`BodyRecord::decoded_sha256`]). `body` is empty when no body was read.
+/// The result of one [`crate::StaticAcquirer::acquire`] call: the envelope
+/// to persist verbatim and the decoded body bytes for the consumer's own
+/// custody, keyed by [`BodyRecord::decoded_sha256`].
+///
+/// Only the acquirer builds one, so its evidence is what the acquirer
+/// actually validated, attempted, and read.
+///
+/// ```compile_fail
+/// # use sylloge::{Acquisition, EvidenceEnvelope};
+/// fn forge(envelope: EvidenceEnvelope) -> Acquisition {
+///     Acquisition { envelope, body: Vec::new() }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Acquisition {
+    envelope: EvidenceEnvelope,
+    body: Vec<u8>,
+}
+
+impl Acquisition {
+    pub(crate) const fn new(envelope: EvidenceEnvelope, body: Vec<u8>) -> Self {
+        Self { envelope, body }
+    }
+
     /// The evidence envelope.
-    pub envelope: EvidenceEnvelope,
-    /// The decoded body bytes.
-    pub body: Vec<u8>,
+    #[must_use]
+    pub const fn envelope(&self) -> &EvidenceEnvelope {
+        &self.envelope
+    }
+
+    /// The decoded body bytes; empty when no body was read. Their SHA-256
+    /// is [`BodyRecord::decoded_sha256`].
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Split into the envelope and the body bytes.
+    #[must_use]
+    pub fn into_parts(self) -> (EvidenceEnvelope, Vec<u8>) {
+        (self.envelope, self.body)
+    }
 }
 
 /// How many leading bytes the binary-data check examines: the WHATWG MIME
@@ -529,7 +592,7 @@ pub(crate) fn extract(
         charset: source.charset,
         segments,
         text_bytes: u64::try_from(text.len()).unwrap_or(u64::MAX),
-        text_sha256: hex(&Sha256::digest(text.as_bytes())),
+        text_sha256: sha256_hex(text.as_bytes()),
         truncated: extracted.truncated,
     };
     (Some(record), reason)
@@ -576,7 +639,7 @@ pub fn replay(envelope: &EvidenceEnvelope, body: &[u8]) -> ReplayOutcome {
     let (Some(recorded_body), Some(recorded)) = (envelope.body(), envelope.extraction()) else {
         return ReplayOutcome::NothingToReplay;
     };
-    let supplied = hex(&Sha256::digest(body));
+    let supplied = sha256_hex(body);
     if supplied != recorded_body.decoded_sha256 {
         return ReplayOutcome::DigestMismatch {
             recorded: recorded_body.decoded_sha256.clone(),
@@ -593,12 +656,14 @@ pub fn replay(envelope: &EvidenceEnvelope, body: &[u8]) -> ReplayOutcome {
     let header_charset = envelope
         .response()
         .and_then(ResponseRecord::content_type)
-        .and_then(super::media::ContentType::parse)
+        .and_then(ContentType::parse)
         .and_then(|ct| ct.charset);
     let max_text = usize::try_from(envelope.limits().max_text_bytes()).unwrap_or(usize::MAX);
     let (again, _) = extract(recorded.media, header_charset.as_deref(), body, max_text);
     let Some(again) = again else {
-        return ReplayOutcome::ExtractionDrift { first_difference: 0 };
+        return ReplayOutcome::ExtractionDrift {
+            first_difference: 0,
+        };
     };
     if again == *recorded {
         return ReplayOutcome::Reproduced;

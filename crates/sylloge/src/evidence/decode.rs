@@ -16,7 +16,6 @@
 use std::io::Write;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The `Accept-Encoding` value matching what [`BodyDecoder`] can decode.
 pub const ACCEPT_ENCODING: &str = "gzip, deflate";
@@ -112,11 +111,10 @@ pub struct DecodedBody {
 
 /// Streaming decoder enforcing wire and decoded ceilings.
 pub struct BodyDecoder {
-    coding: ContentCoding,
     max_wire: u64,
     max_decoded: u64,
     wire_bytes: u64,
-    wire_hash: Sha256,
+    wire_hash: crate::digest::Sha256,
     inner: Inner,
 }
 
@@ -138,25 +136,12 @@ impl BodyDecoder {
             ContentCoding::Deflate => Inner::Deflate(flate2::write::ZlibDecoder::new(sink)),
         };
         Self {
-            coding,
             max_wire,
             max_decoded,
             wire_bytes: 0,
-            wire_hash: Sha256::new(),
+            wire_hash: crate::digest::Sha256::new(),
             inner,
         }
-    }
-
-    /// The coding being decoded.
-    #[must_use]
-    pub const fn coding(&self) -> ContentCoding {
-        self.coding
-    }
-
-    /// Wire bytes accepted so far.
-    #[must_use]
-    pub const fn wire_bytes(&self) -> u64 {
-        self.wire_bytes
     }
 
     /// Feed the next wire chunk.
@@ -206,11 +191,11 @@ impl BodyDecoder {
             }
         })?;
         let bytes = sink.into_bytes();
-        let decoded_sha256 = hex(&Sha256::digest(&bytes));
+        let decoded_sha256 = crate::digest::sha256_hex(&bytes);
         Ok(DecodedBody {
             bytes,
             wire_bytes: self.wire_bytes,
-            wire_sha256: hex(&self.wire_hash.finalize()),
+            wire_sha256: self.wire_hash.finish_hex(),
             decoded_sha256,
         })
     }
@@ -230,17 +215,6 @@ fn corrupt(e: &std::io::Error) -> DecodeError {
     DecodeError::Corrupt {
         detail: e.to_string(),
     }
-}
-
-/// Lowercase hex of `bytes`.
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    out
 }
 
 /// Marker message distinguishing a ceiling refusal from a codec error.
@@ -389,7 +363,11 @@ mod tests {
             body.decoded_sha256, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
             "decoded digest"
         );
-        assert_eq!(body.wire_sha256, hex(&Sha256::digest(&wire)), "wire digest");
+        assert_eq!(
+            body.wire_sha256,
+            crate::digest::sha256_hex(&wire),
+            "wire digest"
+        );
     }
 
     #[test]

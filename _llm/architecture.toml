@@ -31,7 +31,7 @@ role = "Landed: facade re-exporting the sylloge surface, with steelman and brief
 [[architecture.crates]]
 name = "sylloge"
 path = "crates/sylloge"
-role = "Landed: Provider, DeepResearch, and Crawler traits; SearchConstraints with the network-target check and non-forgeable ValidatedTarget; citation, result, freshness, cost, and budget types; in-memory LocalDeepResearch with an offline fixture. Planned: Tier-0 adapters, routing, StaticAcquirer and evidence envelope (replacing Crawler and PageContent), durable ledger, cache, deep-inquiry loop."
+role = "Landed: Provider and DeepResearch traits; SearchConstraints with the network-target check and non-forgeable ValidatedTarget; StaticAcquirer with per-hop validation, the Connector seam, and hop records (Crawler and PageContent retired); citation, result, freshness, cost, and budget types; in-memory LocalDeepResearch with an offline fixture. Planned: Tier-0 adapters, routing, static-acquisition evidence envelope with decoding and extraction, durable ledger, cache, deep-inquiry loop."
 
 [[architecture.crates]]
 name = "elenkhos"

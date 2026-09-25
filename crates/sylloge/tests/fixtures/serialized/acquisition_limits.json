@@ -1,0 +1,12 @@
+{
+  "schemes": "http_and_https",
+  "downgrade": "refuse",
+  "max_redirects": 5,
+  "connect_timeout_ms": 5000,
+  "deadline_ms": 30000,
+  "max_body_bytes": 1048576,
+  "max_decoded_bytes": 2097152,
+  "max_text_bytes": 524288,
+  "max_url_bytes": 2048,
+  "max_header_bytes": 65536
+}

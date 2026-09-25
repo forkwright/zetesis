@@ -11,18 +11,34 @@ publish = false
 [dependencies]
 flate2 = { workspace = true }
 htmlize = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 jiff = { workspace = true }
 language-tags = { workspace = true }
+ring = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 snafu = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 ciborium = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "test-util",
+    "time",
+] }
 
 [lints]
 workspace = true
