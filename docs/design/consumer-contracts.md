@@ -105,7 +105,7 @@ seam.
 | R12 | Send exactly one `User-Agent` field carrying the caller-supplied string, or one producer identifier `zetesis/<version>` when the caller supplies none. | Acquirer | Its user-agent string | None |
 | R13 | Never read proxy environment variables. A consumer that needs a proxy expresses it as a `Connector`. | Transport | A proxy `Connector`, if any | None |
 | R14 | Apply one whole-operation deadline and one per-connect timeout, both caller-supplied, with no crate default (baseline section 9). Deadline expiry is a failure with evidence, not cancellation (baseline section 10). | Limits | Both durations | `deadline_exceeded`, `connect_timeout` |
-| R15 | Enforce wire, decoded and text limits while streaming, within ceilings of 10 MiB, 10 MiB and 4 MiB (`PageContent::MAX_BODY_BYTES` and `MAX_TEXT_BYTES`, `crates/sylloge/src/constraints.rs:474`, `477`). Record every cut: `body.complete`, `extraction.truncated`, `partial { text_limit_reached }`, `wire_limit`, `decoded_limit`. Never truncate silently. | Limits | Values within the ceilings | The named fields and kinds |
+| R15 | Enforce wire, decoded and text limits while streaming, within ceilings of 10 MiB, 10 MiB and 4 MiB (`PageContent::MAX_BODY_BYTES` and `MAX_TEXT_BYTES`, `crates/sylloge/src/constraints.rs:474`, `477`). Record every cut: `extraction.truncated` with `partial { text_limit_reached }`, and `failed { wire_limit }` or `failed { decoded_limit }` for a body over its ceiling. Never truncate silently. | Limits | Values within the ceilings | The named fields and kinds |
 | R16 | Decode text by the declared charset, BOM or meta charset; decode character references; emit valid UTF-8 with byte spans into the decoded source (`zetesis.html_text` version 1, baseline section 7.1). | Extractor | Nothing | `partial { unsupported_charset }`, `partial { invalid_encoding }` |
 | R17 | Publish the accepted media types and content encodings. Anything outside them is a typed failure or `partial { binary_content }`. | Extractor | The media types it needs | `unsupported_content_type`, `unsupported_content_encoding` |
 | R18 | Reach local or private targets only with `LocalTargetAuthorization`, never on the strength of URL or header data. | Target policy (`net_policy.rs:37-41`) | Nothing; no public mint exists | `unsafe_target` |
@@ -169,13 +169,15 @@ These change or sharpen the Phase 01 contract in the baseline.
   discarded. No socket opens and no other effect follows. Baseline section
   10's "no background task survives" holds for sockets, timers and I/O
   tasks; this lookup is the stated exception.
-- **P4. Embedded IPv4 in NAT64 and 6to4.** `canonical_ip` unwraps only the
-  IPv4-mapped and IPv4-compatible forms (`net_policy.rs:404-409`), and
-  `is_blocked_ipv6` has no rule for `64:ff9b::/96` (NAT64) or `2002::/16`
-  (6to4) (`net_policy.rs:370-379`). `64:ff9b::7f00:1`, `64:ff9b::a00:1`,
-  `2002:7f00:1::` and `2002:a00:1::1`, which embed `127.0.0.1` and
-  `10.0.0.1`, all pass classification **(executed)**. The fix belongs in
-  `net_policy`: classify the embedded IPv4 address for both prefixes.
+- **P4. Embedded IPv4 in IPv6 transition forms.** At `0bff055`,
+  `canonical_ip` unwrapped only the IPv4-mapped and IPv4-compatible forms,
+  and `is_blocked_ipv6` had no rule for `64:ff9b::/96` (NAT64) or
+  `2002::/16` (6to4): `64:ff9b::7f00:1`, `64:ff9b::a00:1`, `2002:7f00:1::`
+  and `2002:a00:1::1`, which embed `127.0.0.1` and `10.0.0.1`, all passed
+  classification **(executed)**. Fixed in #87: NAT64, 6to4 and Teredo
+  addresses are classified by their embedded IPv4 destination, the
+  local-use NAT64 prefix is refused, and the IPv6 documentation and
+  discard-only prefixes are blocked.
 - **IP-literal hosts skip the `Resolver`.** The target policy builds the
   address set directly for an IPv4 or IPv6 literal (`net_policy.rs:164-166`)
   and calls the `Resolver` only for a domain (`net_policy.rs:167-175`). A
@@ -299,20 +301,14 @@ Facts needed from the logismos and Tropos owners:
 
 ### 4.3 Kanon Zeugma
 
-What exists in kanon at `adc0994`:
+What exists in kanon (seat-owned, reviewed at `adc0994`): a registry
+declaration for a repository's federated tool surface (surface kind, contract
+path, parity gate, optional call defaults), operational federation rows, and
+a pinned manifest derived from them, with mounting in Angelos planned for a
+later wave.
 
-- A fleet-registry `[repos.surface]` declaration with `kind` (`mcp-stdio`
-  or `cli`), `contract_path`, `parity_gate`, and optional timeout and
-  concurrency defaults (`crates/basanos/standards/fleet-repos.toml:41-49`).
-- Operational `[federation.*]` rows (`workflow/kanon.toml:139-146`).
-- A pinned manifest (schema version 1) derived by `kanon federation pin`;
-  default call timeout 30 s and concurrency 1
-  (`crates/basanos/src/zeugma.rs:1-36`). Mounting in Angelos is a later wave
-  (`zeugma.rs:11-12`).
-
-Zetesis has no `[repos.surface]` row (`fleet-repos.toml:228-231`), no
-federation row, and no CLI or MCP binary (the facade crate holds only
-`crates/zetesis/src/lib.rs`).
+Zetesis declares no federated surface and has no CLI or MCP binary (the
+facade crate holds only `crates/zetesis/src/lib.rs`).
 
 Facts needed from the kanon owner:
 
