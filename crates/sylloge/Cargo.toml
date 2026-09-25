@@ -9,10 +9,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+flate2 = { workspace = true }
+htmlize = { workspace = true }
 jiff = { workspace = true }
 language-tags = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 snafu = { workspace = true }
 url = { workspace = true }
 

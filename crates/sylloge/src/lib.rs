@@ -42,6 +42,7 @@ mod cost;
 mod crawler;
 mod deep;
 mod error;
+pub mod evidence;
 mod fixture;
 mod freshness;
 mod local_deep_research;
