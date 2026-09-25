@@ -68,8 +68,9 @@ impl SearchConstraints {
     /// 2. the URL carries no userinfo;
     /// 3. a host is present (see the WARNING below);
     /// 4. `resolver` resolves the host to concrete address(es), none of which
-    ///    may be loopback, private, link-local, unspecified, multicast, or
-    ///    reserved. This is checked on the RESOLVED address, never the URL
+    ///    may be loopback, private, link-local, unspecified, multicast,
+    ///    reserved, or documentation, nor an IPv6 transition address (NAT64,
+    ///    6to4, Teredo) that delivers to such an IPv4 address. This is checked on the RESOLVED address, never the URL
     ///    text: a hostname that resolves to `127.0.0.1` fails here even though
     ///    its text names no local address, which is what a purely textual check
     ///    misses (DNS rebinding);
@@ -371,15 +372,66 @@ fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
     let loopback = ip.is_loopback();
     let unspecified = ip.is_unspecified();
     let multicast = ip.is_multicast();
-    let [leading_segment, ..] = ip.segments();
-    let unique_local = leading_segment & 0xfe00 == 0xfc00;
-    let link_local = leading_segment & 0xffc0 == 0xfe80;
+    let [s0, s1, s2, s3, s4, s5, s6, s7] = ip.segments();
+    let unique_local = s0 & 0xfe00 == 0xfc00;
+    let link_local = s0 & 0xffc0 == 0xfe80;
+    // RFC 3849 documentation and RFC 6666 discard-only prefixes: never a
+    // routable public destination, like the IPv4 documentation ranges.
+    let documentation = s0 == 0x2001 && s1 == 0x0db8;
+    let discard_only = s0 == 0x0100 && s1 == 0 && s2 == 0 && s3 == 0;
 
-    loopback || unspecified || multicast || unique_local || link_local
+    loopback
+        || unspecified
+        || multicast
+        || unique_local
+        || link_local
+        || documentation
+        || discard_only
+        || embeds_blocked_ipv4([s0, s1, s2, s3, s4, s5, s6, s7])
+}
+
+/// Whether an IPv6 transition address delivers to an embedded IPv4
+/// destination that is itself blocked.
+///
+/// A NAT64 gateway, 6to4 relay, or Teredo relay forwards to the IPv4
+/// address carried inside the IPv6 one, so an embedded loopback or private
+/// address is the same server-side request forgery as the bare address.
+/// - NAT64 well-known prefix `64:ff9b::/96` (RFC 6052): IPv4 in the low 32
+///   bits.
+/// - NAT64 local-use prefix `64:ff9b:1::/48` (RFC 8215): a network-local
+///   translator whose IPv4 placement depends on the local prefix length;
+///   refused outright.
+/// - 6to4 `2002::/16` (RFC 3056): relay IPv4 in bits 16-47.
+/// - Teredo `2001:0::/32` (RFC 4380): server IPv4 in bits 32-63, client
+///   IPv4 bit-inverted in the low 32 bits; blocked if either is.
+fn embeds_blocked_ipv4(segments: [u16; 8]) -> bool {
+    let v4 = |high: u16, low: u16| Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
+    match segments {
+        [0x0064, 0xff9b, 0, 0, 0, 0, high, low] | [0x2002, high, low, ..] => {
+            is_blocked_ipv4(v4(high, low))
+        }
+        [0x0064, 0xff9b, 0x0001, ..] => true,
+        [
+            0x2001,
+            0x0000,
+            server_high,
+            server_low,
+            _,
+            _,
+            client_high,
+            client_low,
+        ] => {
+            is_blocked_ipv4(v4(server_high, server_low))
+                || is_blocked_ipv4(v4(!client_high, !client_low))
+        }
+        _ => false,
+    }
 }
 
 /// Whether `addr` falls in a blocked range (loopback, private,
-/// link-local, unspecified, multicast, or reserved). Both RFC 4291 IPv6
+/// link-local, unspecified, multicast, reserved, documentation, or an IPv6
+/// transition address carrying a blocked IPv4 destination; see
+/// `embeds_blocked_ipv4`). Both RFC 4291 IPv6
 /// forms that embed an IPv4 address in the low 32 bits -- the IPv4-mapped
 /// form (`::ffff:a.b.c.d`, high 80 bits zero then 16 bits of `0xffff`)
 /// AND the deprecated IPv4-compatible form (`::a.b.c.d`, high 96 bits
@@ -743,6 +795,99 @@ mod tests {
             c.check_url(&Url::parse("http://[ff02::1]/").unwrap())
                 .is_err()
         );
+    }
+
+    // -- IPv6 transition forms that carry an IPv4 destination. A NAT64
+    // gateway, 6to4 relay, or Teredo relay forwards to the embedded IPv4
+    // address, so an embedded loopback/private address is the same SSRF
+    // as the bare one. Addresses are written independently of the code
+    // under test: 127.0.0.1 = 7f00:0001, 10.0.0.1 = 0a00:0001,
+    // 8.8.8.8 = 0808:0808. --
+
+    #[test]
+    fn check_url_rejects_nat64_embedding_a_blocked_ipv4() {
+        let c = SearchConstraints::default();
+        for target in ["http://[64:ff9b::7f00:1]/", "http://[64:ff9b::a00:1]/"] {
+            assert!(
+                c.check_url(&Url::parse(target).unwrap()).is_err(),
+                "{target} reaches a blocked IPv4 through NAT64"
+            );
+        }
+    }
+
+    #[test]
+    fn check_url_permits_nat64_embedding_a_public_ipv4() {
+        let c = SearchConstraints::default();
+        assert!(
+            c.check_url(&Url::parse("http://[64:ff9b::808:808]/").unwrap())
+                .is_ok(),
+            "NAT64 to a public IPv4 is an ordinary public target"
+        );
+    }
+
+    #[test]
+    fn check_url_rejects_local_use_nat64_prefix() {
+        // WHY: 64:ff9b:1::/48 (RFC 8215) is a network-local translator whose
+        // IPv4 placement depends on the local prefix length; it is refused
+        // outright rather than guessed at.
+        let c = SearchConstraints::default();
+        assert!(
+            c.check_url(&Url::parse("http://[64:ff9b:1::808:808]/").unwrap())
+                .is_err(),
+            "local-use NAT64 is a local translator"
+        );
+    }
+
+    #[test]
+    fn check_url_rejects_6to4_embedding_a_blocked_ipv4() {
+        let c = SearchConstraints::default();
+        assert!(
+            c.check_url(&Url::parse("http://[2002:7f00:1::1]/").unwrap())
+                .is_err(),
+            "6to4 with an embedded loopback relay is blocked"
+        );
+        assert!(
+            c.check_url(&Url::parse("http://[2002:808:808::1]/").unwrap())
+                .is_ok(),
+            "6to4 with a public embedded address is permitted"
+        );
+    }
+
+    #[test]
+    fn check_url_rejects_teredo_embedding_a_blocked_ipv4() {
+        // Teredo 2001:0::/32: server IPv4 in bits 32-63, client IPv4
+        // bit-inverted in the low 32 bits. Client 10.0.0.1 inverts to
+        // f5ff:fffe.
+        let c = SearchConstraints::default();
+        assert!(
+            c.check_url(&Url::parse("http://[2001:0:808:808::f5ff:fffe]/").unwrap())
+                .is_err(),
+            "a Teredo client address inside 10/8 is blocked"
+        );
+        assert!(
+            c.check_url(&Url::parse("http://[2001:0:7f00:1::f7f7:f7f7]/").unwrap())
+                .is_err(),
+            "a Teredo server address on loopback is blocked"
+        );
+        assert!(
+            c.check_url(&Url::parse("http://[2001:0:808:808::f7f7:f7f7]/").unwrap())
+                .is_ok(),
+            "Teredo between public addresses is permitted"
+        );
+    }
+
+    #[test]
+    fn check_url_rejects_ipv6_documentation_and_discard_prefixes() {
+        // WHY: the IPv4 documentation ranges are already blocked; the IPv6
+        // documentation prefix (RFC 3849) and discard-only prefix
+        // (RFC 6666) are the same class of never-routed destination.
+        let c = SearchConstraints::default();
+        for target in ["http://[2001:db8::1]/", "http://[100::1]/"] {
+            assert!(
+                c.check_url(&Url::parse(target).unwrap()).is_err(),
+                "{target} is not a routable public destination"
+            );
+        }
     }
 
     #[test]

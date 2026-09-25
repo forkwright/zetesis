@@ -19,8 +19,9 @@ Security-sensitive design constraints:
 - Paid-provider access is disabled until explicitly configured and a
   reservation authorizes the spend. A free-tier miss never enables paid use.
 - Network targets fail closed: only `http` and `https`, no userinfo, and no
-  resolved loopback, private, link-local, unspecified, multicast, or reserved
-  address. A local target requires `LocalTargetAuthorization`, which has no
+  resolved loopback, private, link-local, unspecified, multicast, reserved, or
+  documentation address, including one embedded in an IPv6 transition form
+  (IPv4-mapped, NAT64, 6to4, Teredo). A local target requires `LocalTargetAuthorization`, which has no
   public constructor and cannot be deserialized.
 - Static acquisition (planned) validates every redirect hop before connecting,
   connects only to the validated addresses, and never records cookies or
