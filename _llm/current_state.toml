@@ -55,7 +55,7 @@ item = "Scope, four-crate decomposition, free-first provider tiers, and consumer
 
 [[open_threads]]
 name = "Bounded static acquisition"
-status = "Open, tracked by zetesis#48. Phase 01 S1 landed StaticAcquirer with private one-hop transport, per-hop validation, the Connector seam, and hop records, and retired Crawler and PageContent. Phase 01 S2 landed evidence envelope v1, fingerprint, replay, bounded gzip/deflate decoding, and static extraction. Phase 01 S3 (producer release and consumer pins) remains. Contract: docs/design/contract-baseline.md sections 7 to 10."
+status = "Open, tracked by zetesis#48. Phase 01 S1 landed StaticAcquirer with private one-hop transport, per-hop validation, the Connector seam, and hop records, and retired Crawler and PageContent. Phase 01 S2 landed evidence envelope v1, fingerprint, replay, bounded gzip/deflate decoding, and static extraction. Phase 01 S3 recorded the producer revision, schema, extractor, and conformance fixtures in docs/design/static-acquisition-release.md; Kanon registration and consumer compatibility tests and adapters remain. Contract: docs/design/contract-baseline.md sections 7 to 10."
 
 [[open_threads]]
 name = "Paid-research authorization"

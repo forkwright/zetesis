@@ -234,6 +234,10 @@ that sentence; D2 asks dioptron to confirm.
 | Boundary tests for budgets, dioptron attribution, and settlement or release | Consumer | Not met |
 | No dependency cycle | Seat validates | Producer side holds: zetesis depends on no consumer (baseline section 5.1) |
 
+Since this freeze, the two producer rows are met: the producer revision,
+schema, and conformance fixtures are recorded in
+[static-acquisition-release.md](static-acquisition-release.md).
+
 ## 4. Boundaries without a located caller
 
 Per the PLAN, no trait or method names are published for these boundaries.
