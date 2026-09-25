@@ -93,8 +93,9 @@ const META_CONFLICTS_WITH: &str = "conflicts_with";
 /// its hits could pass. A refused provider is not called and records
 /// nothing. Each attempt records the requests its provider reports sending
 /// ([`crate::ProviderAnswer::requests_sent`]) as free requests in
-/// [`ResearchResult::cost_spent`]; a timed-out attempt records none,
-/// because whether its request left is unknown.
+/// [`ResearchResult::cost_spent`]; a timed-out attempt records one,
+/// because its request may have left, and undercounting would understate
+/// use of the provider's quota.
 ///
 /// # Screening and merging
 ///
@@ -286,6 +287,12 @@ impl Router {
             Some(deadline) => {
                 let bounded = tokio::time::timeout_at(deadline, within_deadline(deadline, call));
                 let Ok(answer) = bounded.await else {
+                    // WHY: a cancelled call may already have sent its
+                    // request. Counting it keeps the recorded use of the
+                    // provider's quota from falling below the real use.
+                    collected
+                        .cost
+                        .add(ProviderSpend::new(provider.name(), 0, 1, 1));
                     let timed_out = AttemptOutcome::TimedOut {
                         timeout_ms: saturating_millis(self.attempt_timeout),
                     };

@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 use sylloge::{
     Arxiv, AttemptOutcome, BoxFut, BudgetConstraint, Citation, CostTracking, Error, ErrorClass,
     EvidenceState, FatalCorruptionSnafu, FreshnessBasis, FreshnessPolicy, Provider, ProviderAnswer,
-    ProviderAttempt, ProviderId, ProviderTier, PublicationPrecision, PublicationTimeCapability,
-    QueryShape, RateLimitedSnafu, RefusalReason, ResearchResult, Result, ResultHit, Router,
-    SearchConstraints, SemanticScholar, SourceKind, UnauthorizedSnafu, Wikipedia,
+    ProviderAttempt, ProviderTier, PublicationPrecision, PublicationTimeCapability, QueryShape,
+    RateLimitedSnafu, RefusalReason, ResearchResult, Result, ResultHit, Router, SearchConstraints,
+    SemanticScholar, SourceKind, UnauthorizedSnafu, Wikipedia,
 };
 use url::Url;
 
@@ -1561,15 +1561,17 @@ async fn an_attempt_past_its_timeout_is_receipted_as_timed_out() {
         Duration::from_secs(6),
         "five seconds for the timed-out attempt, one for the next"
     );
+    let requests: Vec<(&str, u32)> = result
+        .cost_spent
+        .by_provider
+        .iter()
+        .map(|(id, spend)| (id.as_str(), spend.request_count))
+        .collect();
     assert_eq!(
-        result
-            .cost_spent
-            .by_provider
-            .keys()
-            .map(ProviderId::as_str)
-            .collect::<Vec<_>>(),
-        ["arxiv"],
-        "whether the cancelled call's request left is unknown, so none is counted for it"
+        requests,
+        [("arxiv", 1), ("semantic_scholar", 1)],
+        "the cancelled call may have sent its request, so it counts as one: \
+         undercounting would understate use of the provider's quota"
     );
 }
 

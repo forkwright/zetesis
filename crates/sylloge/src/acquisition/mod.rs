@@ -18,11 +18,13 @@
 //! 2. an `https` to `http` redirect is refused unless
 //!    [`AcquisitionLimits::downgrade`] is [`DowngradePolicy::Allow`];
 //! 3. the effective port is not on the WHATWG Fetch "bad port" list;
-//! 4. the host is resolved once and the full
+//! 4. the caller's domain deny and allow lists match the URL host, before
+//!    any lookup, so a refused host's name never reaches the resolver;
+//! 5. the host is resolved once and the full
 //!    [`crate::SearchConstraints`] network-target policy runs on the
 //!    resolved addresses, producing the hop's [`crate::ValidatedTarget`]
 //!    (userinfo, blocked address ranges unless a
-//!    [`crate::LocalTargetAuthorization`] is supplied, domain allow/deny).
+//!    [`crate::LocalTargetAuthorization`] is supplied).
 //!
 //! A redirect is followed only from a 301, 302, 303, 307, or 308 response
 //! with exactly one `Location`; the target is resolved against the hop URL
@@ -449,6 +451,11 @@ impl StaticAcquirer {
         constraints: &SearchConstraints,
         local: Option<&LocalTargetAuthorization>,
     ) -> std::result::Result<ValidatedTarget, AcquisitionFailure> {
+        if let Some(host) = url.host() {
+            constraints
+                .check_domain_rules(url, &host)
+                .map_err(|source| policy_failure(source, String::new()))?;
+        }
         let answer = match url.host() {
             Some(Host::Domain(name)) => Some(PinnedAnswer {
                 host: name.to_owned(),
