@@ -4,18 +4,19 @@
 
 pub use elenkhos as steelman;
 pub use sylloge::{
-    BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation, CostTracking, Crawler,
-    DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, Error, ErrorClass,
-    FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy,
+    Arxiv, AttemptOutcome, BoxFut, BudgetConstraint, BudgetExceededSnafu, BudgetScope, Citation,
+    CostTracking, Crawler, DAY_WINDOW, DeepDepth, DeepResearch, DomainDeniedSnafu, EndpointPolicy,
+    Error, ErrorClass, FatalCorruptionSnafu, FreshnessBasis, FreshnessDecision, FreshnessPolicy,
     InvalidConstraintSnafu, InvalidQuerySnafu, LocalDeepResearch, LocalTargetAuthorization,
     MissingCitationsSnafu, OfflineFixture, OversizedPayloadSnafu, PageContent, PermanentIoSnafu,
-    ProvenanceEntry, Provider, ProviderFailureSnafu, ProviderId, ProviderSpend, ProviderTier,
-    PublicationPrecision, PublicationProvenance, PublicationTime, PublicationTimeCapability,
-    QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimitedSnafu, ResearchResult,
-    ResearchStatus, Resolver, Result, ResultHit, SearchConstraints, SourceKind, SourceRetriever,
-    SpendEvent, SpendLedger, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu,
-    TaskUnavailableSnafu, TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu,
-    UnsupportedSnafu, ValidatedTarget, evaluate_freshness,
+    ProvenanceEntry, Provider, ProviderAttempt, ProviderFailureSnafu, ProviderId, ProviderRequest,
+    ProviderSpend, ProviderTier, PublicationPrecision, PublicationProvenance, PublicationTime,
+    PublicationTimeCapability, QueryGenerator, QueryShape, QuotaExhaustedSnafu, RateLimit,
+    RateLimitedSnafu, RefusalReason, ResearchResult, ResearchStatus, Resolver, Result, ResultHit,
+    Router, SearchConstraints, SemanticScholar, SourceKind, SourceRetriever, SpendEvent,
+    SpendLedger, Synthesizer, SystemResolver, TaskId, TaskNotReadySnafu, TaskUnavailableSnafu,
+    TimeoutSnafu, TransientIoSnafu, UnauthorizedSnafu, UnsafeTargetSnafu, UnsupportedSnafu,
+    ValidatedTarget, Wikipedia, evaluate_freshness,
 };
 pub use synopsis as briefing;
 
@@ -67,6 +68,53 @@ mod tests {
         .build();
         assert!(e.is_permanent());
         assert!(e.to_string().contains("re-export check"));
+    }
+
+    #[test]
+    fn provider_cohort_and_router_are_reachable_through_facade() {
+        // WHY: the router, the first provider cohort, and the attempt
+        // receipt types are consumer-facing; exercise each through the
+        // facade path rather than only asserting the `pub use` compiles.
+        let constraints = SearchConstraints::new(3, BudgetConstraint::free_only());
+        let requests: [ProviderRequest; 3] = [
+            SemanticScholar::request("q", &constraints).unwrap(),
+            Arxiv::request("q", &constraints).unwrap(),
+            Wikipedia::new("facade-check/0.0 (https://example.org/contact)")
+                .unwrap()
+                .request("q", &constraints)
+                .unwrap(),
+        ];
+        assert!(
+            requests.iter().all(|r| r.url.scheme() == "https"),
+            "every cohort endpoint is https"
+        );
+        let policies: [EndpointPolicy; 3] =
+            [SemanticScholar::POLICY, Arxiv::POLICY, Wikipedia::POLICY];
+        let paced: Vec<RateLimit> = policies.iter().filter_map(|p| p.rate_limit).collect();
+        assert_eq!(
+            paced.len(),
+            2,
+            "arXiv and Wikipedia document per-client limits"
+        );
+
+        let router = Router::new(Vec::new()).unwrap();
+        assert!(
+            format!("{router:?}").contains("Router"),
+            "the router is reachable and debuggable"
+        );
+        let attempt: ProviderAttempt = serde_json::from_value(serde_json::json!({
+            "ordinal": 0,
+            "tier": "tier1_cheap",
+            "outcome": {"status": "refused", "reason": "paid_routing_unavailable"},
+        }))
+        .unwrap();
+        assert_eq!(
+            attempt.outcome,
+            AttemptOutcome::Refused {
+                reason: RefusalReason::PaidRoutingUnavailable
+            },
+            "receipt types decode through the facade"
+        );
     }
 
     #[test]

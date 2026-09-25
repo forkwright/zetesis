@@ -16,9 +16,59 @@
 //!
 //! All three traits hand-roll their async methods as [`BoxFut`] returns
 //! (`Pin<Box<dyn Future + Send>>`) so they stay dyn-compatible — the
-//! future router stores them as `Box<dyn Trait>` / `Arc<dyn Trait>` —
-//! with `Send`-bounded futures and no `async-trait` dependency.
+//! [`Router`] stores providers as `Arc<dyn Provider>` — with
+//! `Send`-bounded futures and no `async-trait` dependency.
 //! Implementations wrap method bodies in `Box::pin(async move { .. })`.
+//!
+//! # Routing and the first provider cohort
+//!
+//! [`Router`] sends a query to every registered provider that declares its
+//! [`QueryShape`], records one receipt per attempt in the result's
+//! provenance, refuses paid tiers, and merges the answers by stable
+//! identity; its documentation covers routes, receipts, screening,
+//! merging, and the cache key.
+//!
+//! [`SemanticScholar`], [`Arxiv`], and [`Wikipedia`] are the first Tier-0
+//! cohort. Each is a pure request builder (`request`: query and
+//! [`SearchConstraints`] to a [`ProviderRequest`]) and a structured parser
+//! (`parse`: HTTP status, headers, body, and access time to cited
+//! [`ResultHit`]s), with an [`EndpointPolicy`] recording the endpoint's
+//! documented terms. Their `Provider` implementations, and the pacing each
+//! policy records, land with the HTTP transport.
+//!
+//! ## Provider response mapping
+//!
+//! | Response | Result |
+//! |---|---|
+//! | 200 with results | `Ok(hits)` in provider rank order |
+//! | 200 with an empty result list | `Ok(vec![])` |
+//! | 200 whose body does not parse, or lacks a required field | [`Error::ProviderFailure`] naming the defect |
+//! | 400, 414, 422 | [`Error::InvalidQuery`] |
+//! | 401, 403 | [`Error::Unauthorized`] |
+//! | 429 | [`Error::RateLimited`], with `Retry-After` in milliseconds when present |
+//! | any other 4xx | [`Error::PermanentIo`] |
+//! | 5xx, and any other status | [`Error::ProviderFailure`] |
+//!
+//! The status decides: a result-shaped body under an error status is still
+//! the error. Error messages name the status and the defect and never quote
+//! free text from the response body, so upstream text cannot reach a caller
+//! through the error channel.
+//!
+//! ## Provider hit mapping
+//!
+//! Every hit carries one [`Citation`] whose `accessed_at` is the
+//! caller-supplied access time. Its `confidence`, and the hit's `score`, is
+//! the reciprocal of the hit's 1-based rank in the provider's answer (1.0,
+//! 0.5, 0.33, ...): none of the three endpoints returns a relevance score,
+//! so rank is the only relevance signal they give. `content_type` stays
+//! `None` because the provider returned metadata about the source, not the
+//! source payload.
+//!
+//! Metadata keys, each present only when the provider supplied the value:
+//! `doi` (lowercased, no resolver prefix), `arxiv_id` (no version),
+//! `arxiv_version`, `s2_paper_id`, `corpus_id`, `pageid`, `authors` (names in
+//! order), `year`, `venue`, `license`, and `provider_policy_revision` (the
+//! [`EndpointPolicy::revision`] the request was built under).
 //!
 //! # Error taxonomy
 //!
@@ -47,8 +97,10 @@ mod freshness;
 mod local_deep_research;
 mod net_policy;
 mod provider;
+mod providers;
 mod query;
 mod result;
+mod router;
 mod serde_util;
 mod tier;
 
@@ -73,6 +125,12 @@ pub use freshness::{
 pub use local_deep_research::LocalDeepResearch;
 pub use net_policy::{LocalTargetAuthorization, Resolver, SystemResolver, ValidatedTarget};
 pub use provider::{BoxFut, Provider};
+pub use providers::{
+    Arxiv, EndpointPolicy, ProviderRequest, RateLimit, SemanticScholar, Wikipedia,
+};
 pub use query::QueryShape;
-pub use result::{ProvenanceEntry, ResearchResult, ResultHit};
+pub use result::{
+    AttemptOutcome, ProvenanceEntry, ProviderAttempt, RefusalReason, ResearchResult, ResultHit,
+};
+pub use router::Router;
 pub use tier::ProviderTier;

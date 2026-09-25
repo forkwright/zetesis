@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2101.00001v2</id>
+    <published>2021-01-04T13:46:39-05:00</published>
+    <updated>2021-03-02T09:15:00-05:00</updated>
+    <title>Deduplicating preprints by stable identity</title>
+    <summary>The arXiv record of the paper Semantic Scholar also returns.</summary>
+    <author><name>Casey Placeholder</name></author>
+    <arxiv:doi>10.5555/Synthetic.2021.042</arxiv:doi>
+    <link href="http://arxiv.org/abs/2101.00001v2" rel="alternate" type="text/html"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/1812.00003v1</id>
+    <published>2018-12-03T10:00:00-05:00</published>
+    <updated>2018-12-03T10:00:00-05:00</updated>
+    <title>Routing Queries Across Free Scholarly Indexes.</title>
+    <summary>Same normalized title as a Semantic Scholar record, a different year.</summary>
+    <author><name>Ada Example</name></author>
+    <link href="http://arxiv.org/abs/1812.00003v1" rel="alternate" type="text/html"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2102.00002v1</id>
+    <published>2021-02-01T10:00:00-05:00</published>
+    <updated>2021-02-01T10:00:00-05:00</updated>
+    <title>Conflicting Identifiers in Practice</title>
+    <summary>Same arXiv identifier as a Semantic Scholar record, a different DOI.</summary>
+    <author><name>Eli Stand-in</name></author>
+    <arxiv:doi>10.5555/synthetic.2022.777</arxiv:doi>
+    <link href="http://arxiv.org/abs/2102.00002v1" rel="alternate" type="text/html"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2005.00004v1</id>
+    <published>2020-05-01T10:00:00-04:00</published>
+    <updated>2020-05-01T10:00:00-04:00</updated>
+    <title>Same title, same year</title>
+    <summary>Same normalized title and year as a Semantic Scholar record, no shared identity.</summary>
+    <author><name>Fern Proxy</name></author>
+    <link href="http://arxiv.org/abs/2005.00004v1" rel="alternate" type="text/html"/>
+  </entry>
+</feed>

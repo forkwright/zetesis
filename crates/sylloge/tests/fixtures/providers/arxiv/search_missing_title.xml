@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2106.00006v1</id>
+    <title>A Complete Entry</title>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2106.00007v1</id>
+    <summary>An entry without a title.</summary>
+  </entry>
+</feed>

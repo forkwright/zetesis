@@ -11,6 +11,7 @@
 //! fatal (corruption / operator intervention required).
 
 use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
 use crate::budget::BudgetScope;
@@ -311,8 +312,12 @@ const _: () = {
 };
 
 /// Coarse classification for retry logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializable because the router records it in each failed attempt's
+/// receipt ([`crate::AttemptOutcome::Failed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
     /// Safe to retry (usually after a backoff delay).
     Transient,
@@ -632,6 +637,20 @@ mod tests {
             let p = usize::from(e.is_permanent());
             let f = usize::from(e.is_fatal());
             assert_eq!(t + p + f, 1, "classes must be mutually exclusive: {e:?}");
+        }
+    }
+
+    #[test]
+    fn error_class_serializes_as_snake_case_names() {
+        for (class, name) in [
+            (ErrorClass::Transient, "\"transient\""),
+            (ErrorClass::Permanent, "\"permanent\""),
+            (ErrorClass::Fatal, "\"fatal\""),
+        ] {
+            let json = serde_json::to_string(&class).unwrap();
+            assert_eq!(json, name, "wire name of {class:?}");
+            let back: ErrorClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, class, "round trip of {class:?}");
         }
     }
 

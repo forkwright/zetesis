@@ -222,7 +222,10 @@ impl SearchConstraints {
 
 /// Parse an optional domain list into canonical rules (see
 /// [`DomainRule`]); `None` stays `None` (no constraint).
-fn parse_domain_rules(field: &str, entries: Option<&[String]>) -> Result<Option<Vec<DomainRule>>> {
+pub(crate) fn parse_domain_rules(
+    field: &str,
+    entries: Option<&[String]>,
+) -> Result<Option<Vec<DomainRule>>> {
     entries
         .map(|entries| {
             entries

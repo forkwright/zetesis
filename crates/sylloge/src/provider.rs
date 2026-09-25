@@ -12,7 +12,7 @@ use std::pin::Pin;
 use crate::constraints::SearchConstraints;
 use crate::error::Result;
 use crate::freshness::PublicationTimeCapability;
-use crate::{ProviderTier, ResearchResult};
+use crate::{ProviderTier, QueryShape, ResearchResult};
 
 /// `Send`-bounded boxed future returned by every async method on the
 /// [`Provider`], [`crate::DeepResearch`], and [`crate::Crawler`] traits.
@@ -36,8 +36,12 @@ pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// - [`Provider::name`] returns a stable, lowercase, unique identifier.
 ///   The [`crate::CostTracking`] layer keys by this name. Two
 ///   providers returning the same name collapse in the ledger.
-/// - [`Provider::tier`] returns the static tier classification. Used by
-///   the router to pick ordering in the fallback chain.
+/// - [`Provider::tier`] returns the static tier classification. The
+///   [`crate::Router`] refuses every paid tier until durable budget
+///   enforcement exists.
+/// - [`Provider::query_shapes`] declares which [`QueryShape`]s the provider
+///   serves. The [`crate::Router`] attempts a provider only for a shape it
+///   declares.
 /// - [`Provider::search`] is the async call itself. Every return path must
 ///   produce either a populated [`ResearchResult`] or a structured
 ///   [`crate::Error`]. Panicking counts as a corruption bug.
@@ -55,6 +59,15 @@ pub trait Provider: Send + Sync {
 
     /// Tier this provider belongs to.
     fn tier(&self) -> ProviderTier;
+
+    /// Query shapes this provider serves.
+    ///
+    /// Defaults to none, which keeps a provider that does not declare its
+    /// shapes out of every route instead of letting it answer queries it
+    /// was never built for.
+    fn query_shapes(&self) -> &[QueryShape] {
+        &[]
+    }
 
     /// Declares whether this provider can supply
     /// [`crate::PublicationTime::Known`] values on the citations it
@@ -107,6 +120,16 @@ mod tests {
         ) -> BoxFut<'a, Result<ResearchResult>> {
             Box::pin(async move { unreachable!("not exercised by this test") })
         }
+    }
+
+    #[test]
+    fn query_shapes_default_to_none() {
+        // WHY: a provider that never declared its shapes must not be routed
+        // any query by default.
+        assert!(
+            MinimalStub.query_shapes().is_empty(),
+            "an undeclared provider serves no shape"
+        );
     }
 
     #[test]

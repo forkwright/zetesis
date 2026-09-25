@@ -4,7 +4,8 @@
 //! single type the planned downstream consumers (aletheia nous, dioptron,
 //! akroasis) will see regardless of which Tier-0/1/2/3 provider actually
 //! served the query. The provenance trail records which providers were tried
-//! in what order so fallback-chain decisions are auditable after the fact.
+//! in what order, and what each attempt produced, so routing and fallback
+//! decisions are auditable after the fact.
 
 use std::collections::BTreeMap;
 
@@ -14,9 +15,10 @@ use url::Url;
 
 use crate::citation::Citation;
 use crate::cost::{CostTracking, ProviderId};
-use crate::error::{MissingCitationsSnafu, OversizedPayloadSnafu, Result};
+use crate::error::{ErrorClass, MissingCitationsSnafu, OversizedPayloadSnafu, Result};
 use crate::freshness::FreshnessDecision;
 use crate::query::QueryShape;
+use crate::tier::ProviderTier;
 
 /// Single result item from a research call.
 ///
@@ -185,7 +187,7 @@ where
 
 /// Total order for relevance scores: NaN ranks below every comparable
 /// value, so a NaN-scored hit can never displace a legitimately-scored one.
-fn cmp_score(a: f32, b: f32) -> std::cmp::Ordering {
+pub(crate) fn cmp_score(a: f32, b: f32) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a.is_nan(), b.is_nan()) {
         (true, true) => Ordering::Equal,
@@ -218,9 +220,10 @@ pub struct ResearchResult {
     /// don't surface scores must order by their own relevance ranking).
     pub hits: Vec<ResultHit>,
 
-    /// Ordered chain of `(provider_id, citation)` describing which
-    /// providers touched this query in what sequence. Failed attempts
-    /// appear in this chain too.
+    /// Ordered chain describing which providers touched this query in what
+    /// sequence. A routed result carries one attempt receipt per eligible
+    /// provider (see [`ProvenanceEntry::attempt`]): answered, empty, failed,
+    /// and refused attempts all appear, in route order.
     pub provenance: Vec<ProvenanceEntry>,
 
     /// Aggregated cost / quota ledger for this call.
@@ -304,25 +307,142 @@ impl ResearchResult {
 }
 
 /// Single entry in the `provenance` chain.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// An entry records a citation a provider surfaced, a provider attempt
+/// receipt, or both. At least one is always present: [`ProvenanceEntry::new`]
+/// and [`ProvenanceEntry::attempt`] are the only constructors, and
+/// deserialization rejects an entry that carries neither.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ProvenanceEntry {
     /// Stable provider identifier (matches `Provider::name()`).
     pub provider_id: ProviderId,
-    /// Citation the provider surfaced (or a synthetic "miss" citation for
-    /// providers that were attempted but returned no hits).
-    pub citation: Citation,
+    /// Citation the provider surfaced. `None` on a pure attempt receipt:
+    /// an attempt that failed, came back empty, or was refused surfaced no
+    /// material, and an answered attempt's material is cited on its hits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub citation: Option<Citation>,
+    /// Receipt for one routed provider attempt. `None` on an entry that
+    /// only records a citation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<ProviderAttempt>,
 }
 
 impl ProvenanceEntry {
-    /// Construct a provenance entry.
+    /// Construct a provenance entry recording a citation.
     #[must_use]
     pub fn new(provider_id: impl Into<ProviderId>, citation: Citation) -> Self {
         Self {
             provider_id: provider_id.into(),
-            citation,
+            citation: Some(citation),
+            attempt: None,
         }
     }
+
+    /// Construct an attempt receipt with no citation of its own.
+    #[must_use]
+    pub fn attempt(provider_id: impl Into<ProviderId>, attempt: ProviderAttempt) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            citation: None,
+            attempt: Some(attempt),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ProvenanceEntryWire {
+    provider_id: ProviderId,
+    #[serde(default)]
+    citation: Option<Citation>,
+    #[serde(default)]
+    attempt: Option<ProviderAttempt>,
+}
+
+impl<'de> Deserialize<'de> for ProvenanceEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ProvenanceEntryWire::deserialize(deserializer)?;
+        if wire.citation.is_none() && wire.attempt.is_none() {
+            return Err(serde::de::Error::custom(format!(
+                "provenance entry for provider '{}' carries neither a citation nor an attempt receipt",
+                wire.provider_id
+            )));
+        }
+        Ok(Self {
+            provider_id: wire.provider_id,
+            citation: wire.citation,
+            attempt: wire.attempt,
+        })
+    }
+}
+
+/// Receipt for one provider the router considered for a query.
+///
+/// Receipts appear in [`ResearchResult::provenance`] in route order, so the
+/// order providers were tried in, and what each produced, is visible after
+/// the fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProviderAttempt {
+    /// Zero-based position of this provider in the route for the query's
+    /// shape.
+    pub ordinal: u32,
+    /// The provider's tier at the time of the attempt.
+    pub tier: ProviderTier,
+    /// What the attempt produced.
+    pub outcome: AttemptOutcome,
+}
+
+/// What one routed provider attempt produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    /// The provider returned at least one hit. The rejection counts say
+    /// how many of the `returned` hits the router dropped, and why; the
+    /// rest were kept for merging.
+    Answered {
+        /// Hits the provider returned.
+        returned: usize,
+        /// Hits dropped because their primary citation failed the caller's
+        /// freshness window and policy.
+        rejected_by_freshness: usize,
+        /// Hits dropped because their URL host failed the caller's domain
+        /// allow/deny lists.
+        rejected_by_domain: usize,
+        /// Hits dropped because they carried no citation at all.
+        rejected_uncited: usize,
+    },
+    /// The provider answered and had no hits for the query.
+    Empty,
+    /// The provider call failed; the router continued with the remaining
+    /// providers.
+    Failed {
+        /// Retry classification of the failure.
+        class: ErrorClass,
+        /// Rendered error message.
+        message: String,
+    },
+    /// The router did not call the provider.
+    Refused {
+        /// Why the router refused.
+        reason: RefusalReason,
+    },
+}
+
+/// Why the router refused to call an eligible provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// The provider is in a paid tier. Paid routing needs a durable budget
+    /// ledger that can reserve and settle spend per attempt, which does not
+    /// exist yet, so the router refuses every paid provider regardless of
+    /// the caller's [`crate::BudgetConstraint`].
+    PaidRoutingUnavailable,
 }
 
 #[cfg(test)]
@@ -616,5 +736,75 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: ProvenanceEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    fn failed_attempt() -> ProviderAttempt {
+        ProviderAttempt {
+            ordinal: 1,
+            tier: ProviderTier::Tier0Free,
+            outcome: AttemptOutcome::Failed {
+                class: ErrorClass::Transient,
+                message: "provider 'arxiv' rate limited: retry after None ms".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn attempt_receipt_has_a_stable_wire_shape() {
+        let entry = ProvenanceEntry::attempt("arxiv", failed_attempt());
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "provider_id": "arxiv",
+                "attempt": {
+                    "ordinal": 1,
+                    "tier": "tier0_free",
+                    "outcome": {
+                        "status": "failed",
+                        "class": "transient",
+                        "message": "provider 'arxiv' rate limited: retry after None ms"
+                    }
+                }
+            }),
+            "an attempt receipt omits the absent citation and tags its outcome"
+        );
+    }
+
+    #[test]
+    fn attempt_receipt_round_trips_through_json_and_cbor() {
+        let refused = ProvenanceEntry::attempt(
+            "brave",
+            ProviderAttempt {
+                ordinal: 0,
+                tier: ProviderTier::Tier1Cheap,
+                outcome: AttemptOutcome::Refused {
+                    reason: RefusalReason::PaidRoutingUnavailable,
+                },
+            },
+        );
+        for entry in [ProvenanceEntry::attempt("arxiv", failed_attempt()), refused] {
+            let json = serde_json::to_string(&entry).unwrap();
+            let back: ProvenanceEntry = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, entry, "JSON round trip");
+
+            let mut buf = Vec::new();
+            ciborium::into_writer(&entry, &mut buf).unwrap();
+            let back: ProvenanceEntry = ciborium::from_reader(buf.as_slice()).unwrap();
+            assert_eq!(back, entry, "CBOR round trip");
+        }
+    }
+
+    #[test]
+    fn provenance_entry_with_neither_citation_nor_attempt_is_rejected() {
+        let err = serde_json::from_value::<ProvenanceEntry>(serde_json::json!({
+            "provider_id": "arxiv"
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("neither a citation nor an attempt"),
+            "an empty entry must not decode: {err}"
+        );
     }
 }
