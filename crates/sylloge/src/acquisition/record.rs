@@ -267,6 +267,7 @@ pub enum ConnectOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectAttempt {
+    #[serde(with = "crate::serde_util::as_text")]
     addr: SocketAddr,
     result: ConnectOutcome,
 }
@@ -345,6 +346,7 @@ impl TlsRecord {
 #[serde(deny_unknown_fields)]
 pub struct HopRecord {
     url: Url,
+    #[serde(with = "crate::serde_util::list_as_text")]
     resolved: Vec<IpAddr>,
     connect_attempts: Vec<ConnectAttempt>,
     tls: Option<TlsRecord>,

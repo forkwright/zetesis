@@ -10,7 +10,7 @@ source_docs = [
 ]
 
 [architecture]
-summary = "Pre-release sovereign research substrate. Landed: the sylloge typed surface (provider and deep-research traits, constraints with a fail-closed network-target check, citations, results, cost and in-memory budget arithmetic, in-memory deep-research lifecycle with an offline fixture) re-exported by the zetesis facade. Planned: provider adapters and routing, bounded static acquisition with a versioned evidence envelope, durable reservation ledger, cache, deep inquiry through a consumer-granted model contract, steelmanning, and briefings."
+summary = "Pre-release sovereign research substrate. Landed: the sylloge typed surface (provider and deep-research traits, constraints with a fail-closed network-target check, citations, results, cost and in-memory budget arithmetic, in-memory deep-research lifecycle with an offline fixture) plus StaticAcquirer for bounded static acquisition with evidence envelope v1, re-exported by the zetesis facade. Planned: provider adapters and routing, durable reservation ledger, cache, deep inquiry through a consumer-granted model contract, steelmanning, and briefings."
 layers = [
   "facade",
   "provider-routing",
@@ -31,7 +31,7 @@ role = "Landed: facade re-exporting the sylloge surface, with steelman and brief
 [[architecture.crates]]
 name = "sylloge"
 path = "crates/sylloge"
-role = "Landed: Provider and DeepResearch traits; SearchConstraints with the network-target check and non-forgeable ValidatedTarget; StaticAcquirer with per-hop validation, the Connector seam, and hop records (Crawler and PageContent retired); citation, result, freshness, cost, and budget types; in-memory LocalDeepResearch with an offline fixture. Planned: Tier-0 adapters, routing, static-acquisition evidence envelope with decoding and extraction, durable ledger, cache, deep-inquiry loop."
+role = "Landed: Provider and DeepResearch traits; SearchConstraints with the network-target check and non-forgeable ValidatedTarget; StaticAcquirer with per-hop validation, the Connector seam, bounded gzip/deflate decoding, static text extraction, and evidence envelope v1 with fingerprint and replay (Crawler and PageContent retired); citation, result, freshness, cost, and budget types; in-memory LocalDeepResearch with an offline fixture. Planned: Tier-0 adapters, routing, durable ledger, cache, deep-inquiry loop."
 
 [[architecture.crates]]
 name = "elenkhos"

@@ -6,7 +6,7 @@ Zetesis is pre-release. The implementation shape is four crates: `zetesis`, `syl
 
 ## Surface
 
-The landed Rust surface is the `sylloge` provider, constraint, network-target, static-acquisition (`StaticAcquirer`, the only HTTP client), citation, result, cost, budget, and deep-research lifecycle types, re-exported by the `zetesis` facade. No provider adapter, cache, durable ledger, model binding, or daemon exists yet. Planned: the versioned static-acquisition evidence envelope (zetesis#48), a durable identity-bound paid-spend ledger (zetesis#47), and deep inquiry through a consumer-granted model contract.
+The landed Rust surface is the `sylloge` provider, constraint, network-target, static-acquisition (`StaticAcquirer`, the only HTTP client), citation, result, cost, budget, and deep-research lifecycle types, re-exported by the `zetesis` facade. No provider adapter, cache, durable ledger, model binding, or daemon exists yet. `StaticAcquirer` returns the versioned evidence envelope (schema `zetesis.static_acquisition` v1) with fingerprint and replay. Planned: consumer pinning of that envelope (zetesis#48, Phase 01 S3), a durable identity-bound paid-spend ledger (zetesis#47), and deep inquiry through a consumer-granted model contract.
 
 ## Architecture
 

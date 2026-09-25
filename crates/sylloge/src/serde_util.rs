@@ -19,3 +19,64 @@ where
         value.clamp(0.0, 1.0)
     })
 }
+
+/// Serialize a value as its `Display` text and parse it back with
+/// `FromStr`, in every serde format.
+///
+/// WHY: `std::net` addresses serialize as text only in human-readable
+/// formats and as structured values in binary ones (CBOR), so without this
+/// the same evidence record would have two shapes. Evidence carries one
+/// shape in JSON and CBOR alike.
+pub(crate) mod as_text {
+    use std::fmt::Display;
+    use std::str::FromStr;
+
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub(crate) fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Display,
+        S: Serializer,
+    {
+        serializer.collect_str(value)
+    }
+
+    pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: FromStr,
+        T::Err: Display,
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
+    }
+}
+
+/// [`as_text`] for each element of a list.
+pub(crate) mod list_as_text {
+    use std::fmt::Display;
+    use std::str::FromStr;
+
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub(crate) fn serialize<T, S>(values: &[T], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Display,
+        S: Serializer,
+    {
+        serializer.collect_seq(values.iter().map(ToString::to_string))
+    }
+
+    pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+    where
+        T: FromStr,
+        T::Err: Display,
+        D: Deserializer<'de>,
+    {
+        Vec::<String>::deserialize(deserializer)?
+            .iter()
+            .map(|text| text.parse().map_err(de::Error::custom))
+            .collect()
+    }
+}

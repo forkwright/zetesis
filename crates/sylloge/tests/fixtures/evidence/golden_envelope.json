@@ -1,0 +1,95 @@
+{
+  "schema": "zetesis.static_acquisition",
+  "schema_version": 1,
+  "producer": {
+    "package": "sylloge",
+    "version": "0.0.6"
+  },
+  "requested_url": "http://public.example/tides?station=7",
+  "final_url": "http://public.example/tides?station=7",
+  "started_at": "2026-09-22T10:00:01Z",
+  "completed_at": "2026-09-22T10:00:02Z",
+  "limits": {
+    "schemes": "http_and_https",
+    "downgrade": "refuse",
+    "max_redirects": 0,
+    "connect_timeout_ms": 5000,
+    "deadline_ms": 30000,
+    "max_body_bytes": 65536,
+    "max_decoded_bytes": 1048576,
+    "max_text_bytes": 4096,
+    "max_url_bytes": 8192,
+    "max_header_bytes": 417792
+  },
+  "hops": [
+    {
+      "url": "http://public.example/tides?station=7",
+      "resolved": [
+        "8.8.8.8"
+      ],
+      "connect_attempts": [
+        {
+          "addr": "8.8.8.8:80",
+          "result": "connected"
+        }
+      ],
+      "tls": null,
+      "status": 200,
+      "location": null
+    }
+  ],
+  "response": {
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "content_encoding": [
+      "gzip"
+    ],
+    "content_length": 190,
+    "last_modified": "Tue, 22 Sep 2026 10:00:00 GMT",
+    "etag": "\"tide-1\"",
+    "date": null,
+    "retry_after": null
+  },
+  "body": {
+    "coding": "gzip",
+    "wire_bytes": 190,
+    "wire_sha256": "cb169b3b23ad8767099566b7093ab6b02af83093dd67d96064af0007091eb6ec",
+    "decoded_bytes": 217,
+    "decoded_sha256": "1226d22d2282599bdaec3a6432f2b476d22f4b6814ebff27886a57c6d1f3cc81"
+  },
+  "extraction": {
+    "extractor": {
+      "id": "zetesis.html_text",
+      "version": 1
+    },
+    "media": "html",
+    "charset": {
+      "label": "utf-8",
+      "source": "header"
+    },
+    "segments": [
+      {
+        "start": 57,
+        "end": 69,
+        "text": "Tidal record"
+      },
+      {
+        "start": 139,
+        "end": 153,
+        "text": "Harbour levels"
+      },
+      {
+        "start": 162,
+        "end": 197,
+        "text": "Readings & notes for the café."
+      }
+    ],
+    "text_bytes": 59,
+    "text_sha256": "a9fdae16ee21cd3d1b35710df5c4bb84c92b14b627dc2d12c50d5b2093293ada",
+    "truncated": false
+  },
+  "outcome": {
+    "status": "complete"
+  },
+  "fingerprint": "sha256:eda01f2d750b7e845802f0271a556d276f862da6f96515263a602558a04d7476"
+}

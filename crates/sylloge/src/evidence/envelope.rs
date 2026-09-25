@@ -21,8 +21,11 @@
 //! [`ExtractorId`], not the schema.
 //!
 //! Decoding also recomputes the fingerprint and refuses a record whose
-//! stored fingerprint disagrees, so an envelope altered after it was
-//! produced does not decode as evidence.
+//! identity fields disagree with its stored fingerprint, which catches a
+//! corrupted or partially edited record. The fingerprint is not a
+//! signature: anyone can recompute it, so authenticity rests on the
+//! consumer's custody of the stored record. Fields outside the identity
+//! (spans, hops, timestamps) are checked by [`replay`], not by decoding.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -359,8 +362,11 @@ impl EvidenceEnvelope {
         }
     }
 
-    /// `sha256:<hex>` over the content and transformation identity (see
-    /// [`fingerprint`]).
+    /// `sha256:<hex>` over the content and transformation identity: the
+    /// schema id and version, requested and final URLs, decoded body
+    /// digest, extractor id and version, text digest, and outcome kind.
+    /// Timestamps, addresses, TLS details, header values, and spans are not
+    /// part of it.
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
@@ -369,12 +375,14 @@ impl EvidenceEnvelope {
 
 /// Deterministic identity of what was acquired and how it was transformed.
 ///
-/// SHA-256 over a domain-separated sequence of length-prefixed fields: the
-/// schema id and version, requested URL, final URL, decoded body digest,
-/// extractor id and version, text digest, and outcome kind. Timestamps,
-/// addresses, TLS details, and header values are excluded: they vary per
-/// fetch without changing what was acquired. An absent field contributes
-/// an empty value.
+/// SHA-256 over this sequence of fields, in order: the schema id, schema
+/// version, requested URL, final URL, decoded body digest, extractor id,
+/// extractor version, text digest, and outcome kind ([`Outcome::kind`]).
+/// A present field is the byte `0x01`, its UTF-8 length as a big-endian
+/// `u64`, then its bytes; an absent field is the single byte `0x00`, so
+/// absence never collides with an empty value. Timestamps, addresses, TLS
+/// details, header values, and spans are excluded: they vary per fetch, or
+/// follow from the fields above, without changing what was acquired.
 fn fingerprint(
     schema_version: u32,
     requested_url: &Url,
@@ -385,22 +393,29 @@ fn fingerprint(
 ) -> String {
     let version = schema_version.to_string();
     let extractor_version = extraction.map(|e| e.extractor.version.to_string());
-    let fields: [&str; 9] = [
-        EVIDENCE_SCHEMA_ID,
-        &version,
-        requested_url.as_str(),
-        final_url.map_or("", Url::as_str),
-        body.map_or("", |b| b.decoded_sha256.as_str()),
-        extraction.map_or("", |e| e.extractor.id.as_str()),
-        extractor_version.as_deref().unwrap_or(""),
-        extraction.map_or("", |e| e.text_sha256.as_str()),
-        &outcome.kind(),
+    let outcome = outcome.kind();
+    let fields: [Option<&str>; 9] = [
+        Some(EVIDENCE_SCHEMA_ID),
+        Some(&version),
+        Some(requested_url.as_str()),
+        final_url.map(Url::as_str),
+        body.map(|b| b.decoded_sha256.as_str()),
+        extraction.map(|e| e.extractor.id.as_str()),
+        extractor_version.as_deref(),
+        extraction.map(|e| e.text_sha256.as_str()),
+        Some(&outcome),
     ];
     let mut hash = Sha256::new();
     for field in fields {
-        let len = u64::try_from(field.len()).unwrap_or(u64::MAX);
-        hash.update(&len.to_be_bytes());
-        hash.update(field.as_bytes());
+        match field {
+            Some(value) => {
+                let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+                hash.update(&[1]);
+                hash.update(&len.to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+            None => hash.update(&[0]),
+        }
     }
     format!("sha256:{}", hash.finish_hex())
 }
